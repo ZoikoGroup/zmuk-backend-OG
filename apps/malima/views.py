@@ -127,7 +127,7 @@ class AllocateSimsView(APIView):
                         sim=sim,
                         cart_index=entry["cartIndex"],
                         unit_index=entry["unitIndex"],
-                        plan_id=str(entry.get("planId") or entry.get("bqPlanID") or ""),
+                        plan_id=str(entry.get("planId") or entry.get("transatelID,") or ""),
                         status=SimReservation.Status.ACTIVE,
                         expires_at=expires_at,
                     )
@@ -386,3 +386,23 @@ class ReleaseReservationsView(APIView):
             SimInventory.Status.AVAILABLE,
         )
         return Response(_envelope(True, f"Released {len(ids)} reservation(s)."))
+
+class ChangePasswordAPI(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.set_password(serializer.validated_data["password"])
+        user.save()
+
+        # Rotate the auth token so the new session stays valid after the change.
+        Token.objects.filter(user=user).delete()
+        token = Token.objects.create(user=user)
+
+        return Response({
+            "message": "Password updated successfully",
+            "token": token.key,
+        })

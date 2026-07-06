@@ -51,3 +51,23 @@ class CheckoutView(APIView):
             return Response({"detail": "Cart is empty."}, status=400)
         # TODO: create order, take payment, etc.
         return Response({"detail": "Order placed.", "total": str(cart.total)})
+
+class ChangePasswordAPI(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.set_password(serializer.validated_data["password"])
+        user.save()
+
+        # Rotate the auth token so the new session stays valid after the change.
+        Token.objects.filter(user=user).delete()
+        token = Token.objects.create(user=user)
+
+        return Response({
+            "message": "Password updated successfully",
+            "token": token.key,
+        })

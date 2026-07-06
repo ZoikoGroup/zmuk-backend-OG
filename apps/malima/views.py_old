@@ -127,7 +127,7 @@ class AllocateSimsView(APIView):
                         sim=sim,
                         cart_index=entry["cartIndex"],
                         unit_index=entry["unitIndex"],
-                        plan_id=str(entry.get("planId") or entry.get("bqPlanID") or ""),
+                        plan_id=str(entry.get("planId") or entry.get("transatelID,") or ""),
                         status=SimReservation.Status.ACTIVE,
                         expires_at=expires_at,
                     )

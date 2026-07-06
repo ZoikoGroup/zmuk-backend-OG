@@ -85,12 +85,17 @@ INSTALLED_APPS = [
      'apps.news',
     'apps.jobs',
     'apps.search',
+    "apps.transatel",
     'apps.travel_ecosystem_partner',
     'django_ckeditor_5',
     'rest_framework',
     'rest_framework.authtoken',
     'django_filters',
-    'apps.integrations'
+    'apps.integrations',
+    
+    "apps.security",
+   "apps.support",
+    
     # 'apps.forms_api',
     # 'apps.demo_api',
 ]

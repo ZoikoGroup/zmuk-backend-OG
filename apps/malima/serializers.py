@@ -36,7 +36,7 @@ class AllocateCartItemSerializer(serializers.Serializer):
     cartIndex = serializers.IntegerField(min_value=0)
     unitIndex = serializers.IntegerField(min_value=0)
     planId = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    bqPlanID = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    transatelID, = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     simType = serializers.CharField()
     roamingZone = serializers.CharField(
         required=False, allow_null=True, allow_blank=True,

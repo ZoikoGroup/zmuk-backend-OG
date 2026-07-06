@@ -155,7 +155,7 @@ class ProductVariant(models.Model):
     Admin creates as many variants as needed. No code changes required.
     """
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="variants")
-    sku = models.CharField(max_length=100, unique=True)
+    sku = models.CharField(max_length=100, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)

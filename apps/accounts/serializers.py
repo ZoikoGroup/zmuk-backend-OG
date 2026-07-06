@@ -114,3 +114,13 @@ class UpdateUserSerializer(serializers.ModelSerializer):
             instance.profile.save()
 
         return instance
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    password = serializers.CharField(write_only=True, validators=[validate_password])
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        if attrs["password"] != attrs["confirm_password"]:
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        return attrs

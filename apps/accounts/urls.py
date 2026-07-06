@@ -8,7 +8,8 @@ from .views import (
     ForgotPasswordAPI,
     ResetPasswordAPI,
     UpdateUserAPI,
-    SocialUserAPI
+    SocialUserAPI,
+    ChangePasswordAPI,
 )
 
 urlpatterns = [
@@ -21,4 +22,5 @@ urlpatterns = [
     path("reset-password/<uidb64>/<token>/", ResetPasswordAPI.as_view(), name="reset-password"),
     path("update-profile/", UpdateUserAPI.as_view(), name="update-profile"),
     path("social-user/", SocialUserAPI.as_view()),
+     path("change-password/", ChangePasswordAPI.as_view(), name="change-password"),
 ]

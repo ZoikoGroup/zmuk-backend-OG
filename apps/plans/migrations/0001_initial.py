@@ -29,7 +29,7 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('name', models.CharField(max_length=150)),
-                ('bqPlanID', models.CharField(blank=True, max_length=100, null=True, unique=True)),
+                ('transatelID,', models.CharField(blank=True, max_length=100, null=True, unique=True)),
                 ('slug', models.SlugField(blank=True, unique=True)),
                 ('short_description', models.TextField(blank=True, null=True)),
                 ('description', models.TextField(blank=True, null=True)),

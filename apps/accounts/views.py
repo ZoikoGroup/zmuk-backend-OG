@@ -17,7 +17,9 @@ from .serializers import (
     LoginSerializer,
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
-    UpdateUserSerializer
+    UpdateUserSerializer,
+    ChangePasswordSerializer,
+    
 )
 
 
@@ -299,4 +301,25 @@ class SocialUserAPI(APIView):
             "message": "Social login successful",
             "token": token.key,
             "user": user_data
+        })
+
+
+class ChangePasswordAPI(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.set_password(serializer.validated_data["password"])
+        user.save()
+
+        # Rotate the auth token so the new session stays valid after the change.
+        Token.objects.filter(user=user).delete()
+        token = Token.objects.create(user=user)
+
+        return Response({
+            "message": "Password updated successfully",
+            "token": token.key,
         })
