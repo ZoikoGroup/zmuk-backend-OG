@@ -1,6 +1,11 @@
 from django.urls import path
-from .views import StudentDiscountCreateAPIView
+
+from .views import StudentDiscountApplicationView
 
 urlpatterns = [
-    path("student-discount-form", StudentDiscountCreateAPIView.as_view()),
+    path(
+        "",
+        StudentDiscountApplicationView.as_view(),
+        name="student-discount",
+    ),
 ]
