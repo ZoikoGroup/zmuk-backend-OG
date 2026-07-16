@@ -69,6 +69,8 @@ INSTALLED_APPS = [
     'apps.contact',
     'apps.products',
     'apps.accounts',
+    'apps.sim_orders',
+    'apps.recharge',
     'apps.plans',
     'apps.enterprise',
     'apps.travelpartners',
@@ -215,6 +217,36 @@ REST_FRAMEWORK = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:5173",
+    "https://golitereact.vercel.app",
+    "https://react.golitemobile.com",
+    "https://lakhan-golite.vercel.app",
+    "https://golitemobile.com",
+    "https://www.golitemobile.com",
+]
+
+# ===============================
+# FRONTEND URL (used for verification / reset-password email links)
+# ===============================
+# FRONTEND_URL is the fallback used when the request's X-Frontend-Origin
+# header isn't in FRONTEND_ALLOWED_ORIGINS below. Set this to your real
+# production frontend domain once deployed.
+FRONTEND_URL = "http://localhost:3001"
+
+# BACKEND_URL is what gets embedded in the /verify/... link in the
+# registration email. Using this instead of request.build_absolute_uri()
+# means the link is always reachable, regardless of what host header the
+# request happened to arrive on (e.g. 127.0.0.1:8000, which is unreachable
+# from a phone). Update this to your real API domain once deployed.
+BACKEND_URL = "http://127.0.0.1:8000"
+
+FRONTEND_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
     "http://localhost:5173",
     "https://golitereact.vercel.app",
     "https://react.golitemobile.com",
@@ -260,22 +292,14 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 
-# EMAIL_HOST = "smtpout.secureserver.net"
-# EMAIL_PORT = 587
-# EMAIL_USE_TLS = True
 
-# EMAIL_HOST_USER = "info@driverxmobile.com"
-# EMAIL_HOST_PASSWORD = "NoxxMC26070%!LGM"
-
-# DEFAULT_FROM_EMAIL = "Zoiko Group <info@driverxmobile.com>"
 
 
 EMAIL_HOST = 'smtpout.secureserver.net'
 EMAIL_PORT = 465
 EMAIL_USE_TLS = False
 EMAIL_USE_SSL = True
-EMAIL_HOST_USER = 'info@driverxmobile.com'
-EMAIL_HOST_PASSWORD = 'NoxxMC26070%!LGM'
-DEFAULT_FROM_EMAIL = 'Zoiko Group <info@driverxmobile.com>'
-TEST_RECEIVER_EMAIL = "04debasish03@gmail.com"
-EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+EMAIL_HOST_USER = 'info@zoikomobile.co.uk'
+EMAIL_HOST_PASSWORD = 'NoxxMC2607%!'
+DEFAULT_FROM_EMAIL = 'Zoiko Group <info@zoikomobile.co.uk>'
+TEST_RECEIVER_EMAIL = "04debasish03@gmail.com"  

@@ -16,11 +16,18 @@ class RegisterSerializer(serializers.ModelSerializer):
         fields = ("email", "username", "password", "password2", "first_name", "last_name")
 
     def validate(self, attrs):
+        # Normalize case so "Login" always matches what was stored at registration.
+        # (User.objects.create_user() lowercases the email *domain* on its own, so
+        # without this, the stored email can silently end up different-case from
+        # what the user typed, and login by exact match then fails.)
+        attrs["email"] = attrs["email"].strip().lower()
+        attrs["username"] = attrs["username"].strip().lower()
+
         if attrs["password"] != attrs["password2"]:
             raise serializers.ValidationError({"password": "Password fields didn't match."})
-        if User.objects.filter(email=attrs["email"]).exists():
+        if User.objects.filter(email__iexact=attrs["email"]).exists():
             raise serializers.ValidationError({"email": "Email already registered"})
-        if User.objects.filter(username=attrs["username"]).exists():
+        if User.objects.filter(username__iexact=attrs["username"]).exists():
             raise serializers.ValidationError({"username": "Username already taken"})
         return attrs
 
@@ -48,23 +55,26 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
     def validate(self, data):
+        email = data["email"].strip().lower()
+
         try:
-            user_obj = User.objects.get(email=data["email"])
+            user_obj = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             raise serializers.ValidationError("Invalid credentials")
 
-        user = authenticate(
-            username=user_obj.username,
-            password=data["password"],
-        )
-
-        if not user:
+        # Check the password directly instead of going through authenticate().
+        # authenticate() silently returns None for inactive users too, which
+        # made "wrong password" and "not verified yet" look identical to the
+        # user. Checking them separately gives an accurate error message.
+        if not user_obj.check_password(data["password"]):
             raise serializers.ValidationError("Invalid credentials")
 
-        if not user.is_active:
-            raise serializers.ValidationError("Account is not activated")
+        if not user_obj.is_active:
+            raise serializers.ValidationError(
+                "Please verify your email before logging in."
+            )
 
-        return user
+        return user_obj
 
 
 # ---------------- FORGOT PASSWORD ----------------

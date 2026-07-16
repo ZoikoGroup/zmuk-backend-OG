@@ -5,6 +5,21 @@ from rest_framework import serializers
 from .models import SimActivation
 
 
+class OtpRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class OtpVerifySerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField()
+
+    def validate_otp(self, value):
+        value = value.strip()
+        if not value.isdigit() or len(value) != 6:
+            raise serializers.ValidationError("OTP must be exactly 6 digits.")
+        return value
+
+
 class SimActivationSerializer(serializers.ModelSerializer):
 
     simSerial = serializers.CharField(source="sim_serial")
@@ -32,16 +47,9 @@ class SimActivationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_otp(self, value):
-        if not value.isdigit():
-            raise serializers.ValidationError(
-                "OTP must contain only digits."
-            )
-
-        if len(value) < 4 or len(value) > 8:
-            raise serializers.ValidationError(
-                "OTP must be 4-8 digits."
-            )
-
+        value = value.strip()
+        if not value.isdigit() or len(value) != 6:
+            raise serializers.ValidationError("OTP must be exactly 6 digits.")
         return value
 
     def validate_sim_serial(self, value):
@@ -65,10 +73,7 @@ class SimActivationSerializer(serializers.ModelSerializer):
         age = (
             today.year
             - value.year
-            - (
-                (today.month, today.day)
-                < (value.month, value.day)
-            )
+            - ((today.month, today.day) < (value.month, value.day))
         )
 
         if age < 18:
