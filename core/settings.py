@@ -96,8 +96,8 @@ INSTALLED_APPS = [
     'apps.integrations',
     
     "apps.security",
-   "apps.support",
-    
+    "apps.support",
+    "apps.sims",
     # 'apps.forms_api',
     # 'apps.demo_api',
 ]
