@@ -1,0 +1,108 @@
+{% load i18n admin_list %}
+{# Project-level override of jazzmin's admin/pagination.html.               #}
+{# Older jazzmin calls format_html(html_str) with no interpolation args,    #}
+{# which Django 6.0 rejects. Django's built-in paginator_number tag is safe.#}
+<style>
+    .pagination active a {
+        color: #fff !important;
+        cursor: default;
+        pointer-events: none;
+    }
+    .pagination {
+  display: flex;
+  list-style: none;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+}
+
+.pagination .page-item a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid #dee2e6;
+  color: #495057;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  background: #fff;
+  transition: all 0.15s ease-in-out;
+}
+
+.pagination .page-item a:hover {
+  background: #f1f3f5;
+  border-color: #adb5bd;
+  color: #212529;
+}
+
+/* Active page */
+.pagination .page-item.active a {
+  background: #c2c2c2;
+  border-color: #0d6efd;
+  color: #fff;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* "…" ellipsis item (no <a>, plain text) */
+.pagination .page-item:not(.active):not(:has(a)) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  color: #adb5bd;
+  font-size: 13px;
+}
+
+/* Optional: disabled state, if you add class="page-item disabled" */
+.pagination .page-item.disabled a {
+  color: #adb5bd;
+  pointer-events: none;
+  background: #f8f9fa;
+  border-color: #e9ecef;
+}
+
+/* pagination-sm modifier (already on your <ul>) */
+.pagination-sm .page-item a {
+  min-width: 28px;
+  height: 28px;
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+/* float-right utility, since your markup uses it */
+.float-right {
+  float: right;
+}
+</style>
+<div class="row">
+    <div class="col-5">
+        <p class="m-0">
+            {{ cl.result_count }}
+            {% if cl.result_count == 1 %}{{ cl.opts.verbose_name }}{% else %}{{ cl.opts.verbose_name_plural }}{% endif %}
+            {% if show_all_url %}
+                &nbsp;&nbsp;<a href="{{ show_all_url }}" class="showall">{% translate 'Show all' %}</a>
+            {% endif %}
+            {% if cl.formset and cl.result_count %}
+                <input type="submit" name="_save" class="btn btn-sm btn-success" value="{% translate 'Save' %}">
+            {% endif %}
+        </p>
+    </div>
+
+    <div class="col-7">
+        <ul class="pagination pagination-sm m-0 float-right">
+            {% if pagination_required %}
+                {% for i in page_range %}
+                    <li class="page-item {% if i == cl.page_num %}active{% endif %}">
+                        {% paginator_number cl i %}
+                    </li>
+                {% endfor %}
+            {% endif %}
+        </ul>
+    </div>
+</div>
