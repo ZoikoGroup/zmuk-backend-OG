@@ -77,7 +77,7 @@ INSTALLED_APPS = [
     'apps.coupons',
     'apps.careers',
      'apps.activation',
-    # 'apps.student_discount',
+    'apps.student_discount',
     # 'apps.first_responder',
     # 'apps.military_discount',
     # 'apps.marine_discount',
@@ -87,7 +87,7 @@ INSTALLED_APPS = [
      'apps.news',
     'apps.jobs',
     'apps.search',
-    "apps.transatel",
+    # "apps.transatel",
     'apps.travel_ecosystem_partner',
     'django_ckeditor_5',
     'rest_framework',
@@ -96,8 +96,8 @@ INSTALLED_APPS = [
     'apps.integrations',
     
     "apps.security",
-   "apps.support",
-    
+    "apps.support",
+    "apps.sims",
     # 'apps.forms_api',
     # 'apps.demo_api',
 ]
@@ -124,7 +124,7 @@ ROOT_URLCONF = 'core.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / "templates"],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
