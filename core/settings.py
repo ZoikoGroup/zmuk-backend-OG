@@ -13,7 +13,9 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 from pathlib import Path
 import os
 import dj_database_url
+from dotenv import load_dotenv
 
+load_dotenv()
 # BASE_DIR points to the root of your Django project
 BASE_DIR = Path(__file__).resolve().parent.parent
 
