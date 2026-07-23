@@ -54,6 +54,27 @@ class Sim(models.Model):
     sms_usage = models.CharField(max_length=32, blank=True, default="")
     mms_usage = models.CharField(max_length=32, blank=True, default="")
 
+    # --- Inventory / fulfilment ---------------------------------------------
+    # Mirrors the WordPress plugin's `inventory` column + `order_id`. The park
+    # export's `provisioning_status` describes the SIM at the operator; this
+    # tracks where the SIM sits in *our* sell → reserve → activate pipeline.
+    class Inventory(models.TextChoices):
+        IN_STOCK = "INSTOCK", "In stock"
+        PENDING = "PENDING", "Pending (reserved in a cart)"
+        RESERVED = "RESERVED", "Reserved (assigned to an order)"
+        ACTIVATED = "ACTIVATED", "Activated"
+
+    inventory = models.CharField(
+        max_length=16,
+        choices=Inventory.choices,
+        default=Inventory.IN_STOCK,
+        db_index=True,
+    )
+    # Order this SIM was assigned to (free-form reference, e.g. "WC-1042").
+    order_reference = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    activation_transaction_id = models.CharField(max_length=128, blank=True, default="")
+
     # --- Bookkeeping ---
     imported_at = models.DateTimeField(auto_now=True)
 
@@ -64,3 +85,42 @@ class Sim(models.Model):
 
     def __str__(self):
         return f"{self.iccid} ({self.msisdn or 'no MSISDN'})"
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
+
+    @property
+    def is_esim(self) -> bool:
+        """True when this is an eSIM, matched on `type_of_sim` (the discriminator)."""
+        return "esim" in (self.type_of_sim or "").strip().lower()
+
+    @property
+    def sim_type_key(self) -> str:
+        """Normalised "esim" | "psim" for API/reservation matching."""
+        return "esim" if self.is_esim else "psim"
+
+
+class SimReservation(models.Model):
+    """Short-lived hold placed on a SIM while it sits in a cart.
+
+    Port of the plugin's `wp_transatel_sim_reservations` table. A background
+    job (see `manage.py cleanup_reservations`) releases holds whose
+    `expires_at` has passed, returning the SIM to stock.
+    """
+
+    sim = models.ForeignKey(
+        Sim, on_delete=models.CASCADE, related_name="reservations", db_index=True
+    )
+    cart_key = models.CharField(max_length=100, db_index=True)
+    session_id = models.CharField(max_length=100, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "SIM reservation"
+        verbose_name_plural = "SIM reservations"
+        indexes = [
+            models.Index(fields=["cart_key", "session_id"]),
+        ]
+
+    def __str__(self):
+        return f"hold {self.sim_id} · {self.cart_key} · until {self.expires_at:%Y-%m-%d %H:%M}"

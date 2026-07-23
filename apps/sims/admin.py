@@ -7,7 +7,7 @@ from django.urls import path, reverse
 from django.utils.html import format_html
 
 from .csv_import import CsvImportError, import_sims
-from .models import Sim
+from .models import Sim, SimReservation
 
 
 class CsvImportForm(forms.Form):
@@ -23,12 +23,14 @@ class SimAdmin(admin.ModelAdmin):
     change_list_template = "admin/sims/sim_changelist.html"
 
     list_display = (
-        "iccid", "msisdn", "type_of_sim", "colored_status", "prepaid_status",
+        "iccid", "msisdn", "type_of_sim", "colored_status", "inventory",
+        "order_reference", "prepaid_status",
         "subscriber", "customer_account", "first_activation_date", "last_seen_date",
     )
     list_display_links = ("iccid",)
     list_filter = (
-        "provisioning_status", "prepaid_status", "type_of_sim", "group", "customer_account",
+        "inventory", "provisioning_status", "prepaid_status", "type_of_sim",
+        "group", "customer_account",
     )
     search_fields = (
         "iccid", "imsi", "msisdn", "serial_number", "subscriber", "reference",
@@ -38,12 +40,16 @@ class SimAdmin(admin.ModelAdmin):
     list_per_page = 50
     ordering = ("provisioning_status", "-first_activation_date")
 
-    readonly_fields = ("imported_at",)
+    readonly_fields = ("imported_at", "activated_at", "activation_transaction_id")
     fieldsets = (
         ("Identity", {
             "fields": ("iccid", "serial_number", "imsi", "msisdn", "type_of_sim", "sim_reference"),
         }),
         ("Status", {"fields": ("provisioning_status", "prepaid_status")}),
+        ("Fulfilment", {
+            "fields": ("inventory", "order_reference", "activated_at",
+                       "activation_transaction_id"),
+        }),
         ("Owner / account", {
             "fields": ("subscriber", "company", "reference", "customer_account", "group", "point_of_sale"),
         }),
@@ -120,3 +126,12 @@ class SimAdmin(admin.ModelAdmin):
             "opts": self.model._meta,
         }
         return TemplateResponse(request, "admin/sims/import_csv.html", context)
+
+
+@admin.register(SimReservation)
+class SimReservationAdmin(admin.ModelAdmin):
+    list_display = ("sim", "cart_key", "session_id", "expires_at", "created_at")
+    list_filter = ("expires_at", "created_at")
+    search_fields = ("cart_key", "session_id", "sim__iccid", "sim__msisdn")
+    date_hierarchy = "expires_at"
+    autocomplete_fields = ("sim",)
