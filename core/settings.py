@@ -116,14 +116,16 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 CSRF_TRUSTED_ORIGINS = os.getenv(
     "CSRF_TRUSTED_ORIGINS",
-    "https://*.onrender.com"
+    "https://*.onrender.com",
+    "https://zmuk-backend.onrender.com",
+    "https://zmuk-frontend.vercel.app"
 ).split(",")
 
 
 JAZZMIN_SETTINGS = {
-    "site_title": " Zoiko Orbit Admin",
+    "site_title": " ZoikoMobile Admin",
     "site_header": "Orbit ",
-    "site_brand": "Zoiko Orbit Admin",
+    "site_brand": "ZoikoMobile Admin",
 }
 ROOT_URLCONF = 'core.urls'
 
