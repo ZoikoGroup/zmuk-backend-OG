@@ -12,7 +12,10 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 from pathlib import Path
 import os
+import dj_database_url
+from dotenv import load_dotenv
 
+load_dotenv()
 # BASE_DIR points to the root of your Django project
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -32,21 +35,17 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure--*m0dv5bkb12f!kv=2rrox2e1+53ptw4ev-y6hzj@f$1lann#g'
+SECRET_KEY =  os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False") == "True"
+
 
 #ALLOWED_HOSTS = []
-ALLOWED_HOSTS = [
-    'api.zoikoorbit.com',
-    '34.105.191.19',
-    'localhost:3000',
-    '127.0.0.1:8000',
-    '127.0.0.1',
-    'http://127.0.0.1:8000',
-]
-
+ALLOWED_HOSTS = os.getenv(
+    "ALLOWED_HOSTS",
+    "localhost,127.0.0.1"
+).split(",")
 
 # Application definition
 
@@ -149,13 +148,36 @@ WSGI_APPLICATION = 'core.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+DATABASE_URL = os.getenv("DATABASE_URL")
 
+if DATABASE_URL:
+    DATABASES = {
+        "default": dj_database_url.parse(DATABASE_URL)
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
+    
+    
+    
+    
+    
+    
+    
+    
+    #csrf
+    
+    
+    CSRF_TRUSTED_ORIGINS = os.getenv(
+    "CSRF_TRUSTED_ORIGINS",
+    "https://*.onrender.com"
+).split(",")
+    
+    
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -236,14 +258,19 @@ CORS_ALLOWED_ORIGINS = [
 # FRONTEND_URL is the fallback used when the request's X-Frontend-Origin
 # header isn't in FRONTEND_ALLOWED_ORIGINS below. Set this to your real
 # production frontend domain once deployed.
-FRONTEND_URL = "http://localhost:3001"
-
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "http://localhost:3001"
+)
 # BACKEND_URL is what gets embedded in the /verify/... link in the
 # registration email. Using this instead of request.build_absolute_uri()
 # means the link is always reachable, regardless of what host header the
 # request happened to arrive on (e.g. 127.0.0.1:8000, which is unreachable
 # from a phone). Update this to your real API domain once deployed.
-BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_URL = os.getenv(
+    "BACKEND_URL",
+    "http://127.0.0.1:8000"
+)
 
 FRONTEND_ALLOWED_ORIGINS = [
     "http://localhost:3000",
@@ -289,20 +316,57 @@ CORS_ALLOW_METHODS = [
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+
+
+
+
+# stripe keys 
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
+
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+
+
+
+
+
 # ===============================9999999999999
 # EMAIL / SMTP CONFIGURATION
 # ===============================
 
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_BACKEND =  os.getenv(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.smtp.EmailBackend"
+)
 
 
 
 
-EMAIL_HOST = 'smtpout.secureserver.net'
-EMAIL_PORT = 465
-EMAIL_USE_TLS = False
-EMAIL_USE_SSL = True
-EMAIL_HOST_USER = 'info@zoikomobile.co.uk'
-EMAIL_HOST_PASSWORD = 'NoxxMC2607%!'
-DEFAULT_FROM_EMAIL = 'Zoiko Group <info@zoikomobile.co.uk>'
-TEST_RECEIVER_EMAIL = "04debasish03@gmail.com"  
+
+
+
+
+EMAIL_HOST = os.getenv("EMAIL_HOST")
+
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+
+EMAIL_USE_TLS = os.getenv(
+    "EMAIL_USE_TLS",
+    "False"
+) == "True"
+
+EMAIL_USE_SSL = os.getenv(
+    "EMAIL_USE_SSL",
+    "True"
+) == "True"
+
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
+
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
+
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
+
+TEST_RECEIVER_EMAIL = os.getenv("TEST_RECEIVER_EMAIL")
