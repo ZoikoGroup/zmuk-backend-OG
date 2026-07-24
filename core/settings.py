@@ -42,10 +42,13 @@ DEBUG = os.getenv("DEBUG", "False") == "True"
 
 
 #ALLOWED_HOSTS = []
-ALLOWED_HOSTS = os.getenv(
-    "ALLOWED_HOSTS",
-    "localhost,127.0.0.1"
-).split(",")
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv(
+        "ALLOWED_HOSTS",
+        "localhost,127.0.0.1,zmuk-backend.onrender.com"
+    ).split(",")
+]
 
 # Application definition
 
@@ -101,15 +104,17 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
+
+    "corsheaders.middleware.CorsMiddleware",
+
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
@@ -118,6 +123,7 @@ CSRF_TRUSTED_ORIGINS = [
     "https://api.zoikomobile.co.uk",
     "https://react.zoikomobile.co.uk",
     "https://zmuk-frontend.vercel.app",
+    "https://zmuk-backend.onrender.com",
 ]
 
 
@@ -162,21 +168,7 @@ else:
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
-    
-    
-    
-    
-    
-    
-    
-    
-    #csrf
-    
-    
-    CSRF_TRUSTED_ORIGINS = os.getenv(
-    "CSRF_TRUSTED_ORIGINS",
-    "https://*.onrender.com"
-).split(",")
+
     
     
 
@@ -241,17 +233,6 @@ REST_FRAMEWORK = {
 }
 
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://zmuk-frontend.vercel.app",
-    "http://127.0.0.1:3001",
-    "http://localhost:5173",
-    "https://golitereact.vercel.app",
-    "https://react.golitemobile.com",
-    "https://lakhan-golite.vercel.app",
-    "https://golitemobile.com",
-    "https://www.golitemobile.com",
-    "https://zmuk-backend.onrender.com",
     "https://zmuk-frontend.vercel.app",
     
 ]
@@ -264,7 +245,7 @@ CORS_ALLOWED_ORIGINS = [
 # production frontend domain once deployed.
 FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
-    "http://zmuk-frontend.vercel.app"
+    "https://zmuk-frontend.vercel.app"
 )
 # BACKEND_URL is what gets embedded in the /verify/... link in the
 # registration email. Using this instead of request.build_absolute_uri()
@@ -273,25 +254,15 @@ FRONTEND_URL = os.getenv(
 # from a phone). Update this to your real API domain once deployed.
 BACKEND_URL = os.getenv(
     "BACKEND_URL",
-    "http://127.0.0.1:8000"
+    "https://zmuk-backend.onrender.com"
 )
 
 FRONTEND_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://zmuk-frontend.vercel.app",
-    "http://127.0.0.1:3001",
-    "http://localhost:5173",
-    "https://golitereact.vercel.app",
-    "https://react.golitemobile.com",
-    "https://lakhan-golite.vercel.app",
-    "https://golitemobile.com",
-    "https://www.golitemobile.com",
-    "http://zmuk-frontend.vercel.app",
-    "https://zmuk-backend.onrender.com",
+    "https://zmuk-frontend.vercel.app",
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True  
+CORS_ALLOW_ALL_ORIGINS = False  
+CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -347,12 +318,6 @@ EMAIL_BACKEND =  os.getenv(
     "EMAIL_BACKEND",
     "django.core.mail.backends.smtp.EmailBackend"
 )
-
-
-
-
-
-
 
 
 EMAIL_HOST = os.getenv("EMAIL_HOST")
