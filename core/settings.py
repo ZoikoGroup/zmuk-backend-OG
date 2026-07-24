@@ -114,10 +114,11 @@ MIDDLEWARE = [
 
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
-CSRF_TRUSTED_ORIGINS = os.getenv(
-    "CSRF_TRUSTED_ORIGINS",
-    "https://api.zoikomobile.co.uk,https://react.zoikomobile.co.uk,https://zmuk-frontend.vercel.app"
-).split(",")
+CSRF_TRUSTED_ORIGINS = [
+    "https://api.zoikomobile.co.uk",
+    "https://react.zoikomobile.co.uk",
+    "https://zmuk-frontend.vercel.app",
+]
 
 
 JAZZMIN_SETTINGS = {
