@@ -242,7 +242,7 @@ REST_FRAMEWORK = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:3001",
+    "http://zmuk-frontend.vercel.app",
     "http://127.0.0.1:3001",
     "http://localhost:5173",
     "https://golitereact.vercel.app",
@@ -250,6 +250,9 @@ CORS_ALLOWED_ORIGINS = [
     "https://lakhan-golite.vercel.app",
     "https://golitemobile.com",
     "https://www.golitemobile.com",
+    "https://zmuk-backend.onrender.com",
+    "https://zmuk-frontend.vercel.app",
+    
 ]
 
 # ===============================
@@ -260,7 +263,7 @@ CORS_ALLOWED_ORIGINS = [
 # production frontend domain once deployed.
 FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
-    "http://localhost:3001"
+    "http://zmuk-frontend.vercel.app"
 )
 # BACKEND_URL is what gets embedded in the /verify/... link in the
 # registration email. Using this instead of request.build_absolute_uri()
@@ -275,7 +278,7 @@ BACKEND_URL = os.getenv(
 FRONTEND_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:3001",
+    "http://zmuk-frontend.vercel.app",
     "http://127.0.0.1:3001",
     "http://localhost:5173",
     "https://golitereact.vercel.app",
@@ -283,6 +286,8 @@ FRONTEND_ALLOWED_ORIGINS = [
     "https://lakhan-golite.vercel.app",
     "https://golitemobile.com",
     "https://www.golitemobile.com",
+    "http://zmuk-frontend.vercel.app",
+    "https://zmuk-backend.onrender.com",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True  
