@@ -21,6 +21,7 @@ from .serializers import (
     ChangePasswordSerializer,
     
 )
+from .utils import get_safe_frontend_origin
 
 
 # ---------------- REGISTER ----------------
@@ -35,15 +36,16 @@ class RegisterAPI(APIView):
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
 
-        # ✅ Get frontend origin from React request header (dynamic)
-        frontend_origin = request.headers.get(
-            "X-Frontend-Origin",
-            f"{request.scheme}://{request.get_host()}"  # fallback just in case
-        )
+        # ✅ Only trust X-Frontend-Origin if it's a known frontend; otherwise
+        # fall back to the canonical FRONTEND_URL from settings.
+        frontend_origin = get_safe_frontend_origin(request)
 
-        # 🔗 Verification link includes frontend_origin as query param
+        # 🔗 Verification link includes frontend_origin as query param.
+        # Uses settings.BACKEND_URL (not request.build_absolute_uri) so the
+        # link is always a reachable address, not whatever host the request
+        # happened to arrive on.
         verification_link = (
-            f"{request.build_absolute_uri('/')[:-1]}/api/accounts/verify/{uid}/{token}/"
+            f"{settings.BACKEND_URL}/api/accounts/verify/{uid}/{token}/"
             f"?frontend={frontend_origin}"
         )
 
@@ -76,11 +78,14 @@ class VerifyEmailAPI(APIView):
         user.is_active = True
         user.save()
 
-        # ✅ Read frontend origin from query param passed in verification link
-        frontend_origin = request.GET.get(
-            "frontend",
-            f"{request.scheme}://{request.get_host()}"  # fallback backend base URL
-        )
+        # ✅ Read frontend origin from query param passed in verification link,
+        # but only trust it if it's a known frontend (avoids an open redirect).
+        requested = request.GET.get("frontend", "").rstrip("/")
+        allowed = getattr(settings, "FRONTEND_ALLOWED_ORIGINS", [])
+        if requested in allowed:
+            frontend_origin = requested
+        else:
+            frontend_origin = getattr(settings, "FRONTEND_URL", "").rstrip("/")
 
         # 🔗 Redirect to frontend login with verified flag
         return redirect(f"{frontend_origin}/login?verified=1")
@@ -164,10 +169,10 @@ class ForgotPasswordAPI(APIView):
         serializer = ForgotPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        email = serializer.validated_data["email"]
+        email = serializer.validated_data["email"].strip().lower()
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             return Response({
                 "message": "If the email exists, a reset link was sent."
@@ -176,10 +181,7 @@ class ForgotPasswordAPI(APIView):
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
 
-        frontend_origin = request.headers.get(
-            "X-Frontend-Origin",
-            f"{request.scheme}://{request.get_host()}"
-        )
+        frontend_origin = get_safe_frontend_origin(request)
 
         reset_link = f"{frontend_origin}/reset-password/{uid}/{token}"
 
