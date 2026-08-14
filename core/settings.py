@@ -233,8 +233,11 @@ REST_FRAMEWORK = {
 }
 
 CORS_ALLOWED_ORIGINS = [
-    "https://zmuk-frontend.vercel.app",
-    
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "https://zmuk-frontend.vercel.app"
+    ).split(",")
 ]
 
 # ===============================
@@ -258,7 +261,11 @@ BACKEND_URL = os.getenv(
 )
 
 FRONTEND_ALLOWED_ORIGINS = [
-    "https://zmuk-frontend.vercel.app",
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ALLOWED_ORIGINS",
+        "https://zmuk-frontend.vercel.app"
+    ).split(",")
 ]
 
 CORS_ALLOW_ALL_ORIGINS = False  
