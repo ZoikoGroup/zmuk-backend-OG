@@ -52,16 +52,54 @@ def _available_queryset(sim_type_key: str):
     # provisioning_status == "available", tolerant of case/whitespace.
     qs = qs.filter(provisioning_status__iexact="available")
 
+    # Transatel park export uses type_of_sim = "eUICC" (embedded/eSIM) vs
+    # "UICC" (physical/pSIM). "UICC" is a substring of "eUICC", so eSIM matches
+    # on "euicc" and pSIM is everything that is NOT eUICC.
     if sim_type_key == "esim":
-        qs = qs.filter(type_of_sim__icontains="esim")
+        qs = qs.filter(Q(type_of_sim__icontains="euicc") | Q(type_of_sim__icontains="esim"))
     else:
-        # Physical: anything that isn't an eSIM (physical / standard / psim).
-        qs = qs.exclude(type_of_sim__icontains="esim")
+        # Physical (UICC): anything that isn't an embedded eUICC / eSIM.
+        qs = qs.exclude(type_of_sim__icontains="euicc").exclude(type_of_sim__icontains="esim")
     return qs.order_by("id")
 
 
 def count_available(sim_type_key: str) -> int:
     return _available_queryset(sim_type_key).count()
+
+
+def latest_available_sim() -> Sim | None:
+    """The most recently imported sellable SIM (any delivery type).
+
+    "Latest" = highest `imported_at` (falling back to `id` as a tiebreaker
+    for rows imported in the same batch/second). Used by the
+    availability-check endpoint that hands the storefront a single ICCID.
+    Returns None when nothing is available.
+    """
+    qs = (
+        Sim.objects.filter(inventory=Sim.Inventory.IN_STOCK)
+        .filter(~Q(msisdn="") & Q(msisdn__isnull=False))
+        .filter(provisioning_status__iexact="available")
+    )
+    return qs.order_by("-imported_at", "-id").first()
+
+
+def latest_available_sims(sim_type_key: str, count: int) -> list["Sim"]:
+    """The `count` most recently imported sellable SIMs of one delivery type.
+
+    "Latest" = highest `imported_at` (id as a tiebreaker). Type matching is the
+    same as `_available_queryset` (esim → eUICC, psim → UICC). Read-only — this
+    does NOT reserve anything, so two callers can be handed the same SIM; the
+    caller must still reserve/assign before checkout.
+
+    Returns a list that may be shorter than `count` when stock is low, or empty
+    when `count <= 0`.
+    """
+    if count <= 0:
+        return []
+    sim_type_key = "esim" if sim_type_key == "esim" else "psim"
+    return list(
+        _available_queryset(sim_type_key).order_by("-imported_at", "-id")[:count]
+    )
 
 
 @transaction.atomic
@@ -162,3 +200,20 @@ def mark_activated(sim, transaction_id=""):
         update_fields=["inventory", "activated_at", "activation_transaction_id"]
     )
     return sim
+
+@transaction.atomic
+def return_to_stock(sims):
+    """Release SIMs back to sellable INSTOCK and clear the order reference.
+
+    Used when an order's activation fails so the SIM isn't stranded in
+    RESERVED (which would leak sellable inventory on every failed attempt).
+    Accepts Sim instances or ids. Skips rows already ACTIVATED, so a
+    partially-successful order can't un-sell a live SIM.
+    """
+    ids = [getattr(s, "id", s) for s in sims]
+    if not ids:
+        return []
+    Sim.objects.filter(id__in=ids).exclude(
+        inventory=Sim.Inventory.ACTIVATED
+    ).update(inventory=Sim.Inventory.IN_STOCK, order_reference="")
+    return ids

@@ -43,8 +43,11 @@ _DEFAULTS = {
     "CLIENT_SECRET": "",
     # Wholesale rate plan applied on activation (plugin hard-codes this).
     "RATE_PLAN": "MVNA Wholesale PAYM 7",
-    # Subscriber group tag sent with activate/modify.
-    "GROUP": "ZOIKO eSIM",
+    # Subscriber group tag sent with activate/modify. This MUST be a group
+    # Transatel has provisioned for your account; an unknown value makes the
+    # activation transaction fail asynchronously (SIM stays AVAILABLE). The
+    # plugin used "Group A1" — override via settings.TRANSATEL / TRANSATEL_GROUP.
+    "GROUP": "Group A1",
     # ISO country of residence used when the order doesn't supply one.
     "DEFAULT_COUNTRY_OF_RESIDENCE": "UK",
     # Refresh the token this many seconds before it actually expires.
