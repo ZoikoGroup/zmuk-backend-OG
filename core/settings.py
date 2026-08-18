@@ -42,30 +42,27 @@ DEBUG = os.getenv("DEBUG", "False") == "True"
 
 
 #ALLOWED_HOSTS = []
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.getenv(
-        "ALLOWED_HOSTS",
-        "localhost,127.0.0.1,zmuk-backend.onrender.com"
-    ).split(",")
-]
+ALLOWED_HOSTS = os.getenv(
+    "ALLOWED_HOSTS",
+    "localhost,127.0.0.0"
+).split(",")
 
 # Application definition
 
 INSTALLED_APPS = [
     "jazzmin",
 
- 'django.contrib.admin',
+    'django.contrib.admin',
     'corsheaders',
-   
-'django.contrib.auth',
+
+    'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'core',
     'apps.blog',
-      "apps.switch", 
+    "apps.switch", 
     'apps.business_enterprise',
     'apps.contact',
     'apps.products',
@@ -77,15 +74,10 @@ INSTALLED_APPS = [
     'apps.travelpartners',
     'apps.coupons',
     'apps.careers',
-     'apps.activation',
+    'apps.activation',
     'apps.student_discount',
-    # 'apps.first_responder',
-    # 'apps.military_discount',
-    # 'apps.marine_discount',
-    # 'apps.senior_discount',
-    'apps.orders',
     'apps.newsletter',
-     'apps.news',
+    'apps.news',
     'apps.jobs',
     'apps.search',
     # "apps.transatel",
@@ -95,35 +87,34 @@ INSTALLED_APPS = [
     'rest_framework.authtoken',
     'django_filters',
     'apps.integrations',
-    
+
     "apps.security",
     "apps.support",
     "apps.sims",
     # 'apps.forms_api',
     # 'apps.demo_api',
+    'django_extensions',
 ]
-
 MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
-
-    "corsheaders.middleware.CorsMiddleware",
-
-    "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    'corsheaders.middleware.CorsMiddleware',          # ← first
+    'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# DEBUG = True  # removed hardcoded override
 
 CSRF_TRUSTED_ORIGINS = [
     "https://api.zoikomobile.co.uk",
     "https://react.zoikomobile.co.uk",
     "https://zmuk-frontend.vercel.app",
-    "https://zmuk-backend.onrender.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:8000",
 ]
 
 
@@ -168,7 +159,13 @@ else:
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
-
+    
+    
+    
+    CSRF_TRUSTED_ORIGINS = os.getenv(
+    "CSRF_TRUSTED_ORIGINS",
+    "https://*.onrender.com"
+).split(",")
     
     
 
@@ -232,13 +229,10 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 9,
 }
 
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CORS_ALLOWED_ORIGINS",
-        "https://zmuk-frontend.vercel.app"
-    ).split(",")
-]
+CORS_ALLOWED_ORIGINS = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
 
 # ===============================
 # FRONTEND URL (used for verification / reset-password email links)
@@ -248,7 +242,7 @@ CORS_ALLOWED_ORIGINS = [
 # production frontend domain once deployed.
 FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
-    "https://zmuk-frontend.vercel.app"
+    "http://zmuk-frontend.vercel.app"
 )
 # BACKEND_URL is what gets embedded in the /verify/... link in the
 # registration email. Using this instead of request.build_absolute_uri()
@@ -257,19 +251,15 @@ FRONTEND_URL = os.getenv(
 # from a phone). Update this to your real API domain once deployed.
 BACKEND_URL = os.getenv(
     "BACKEND_URL",
-    "https://zmuk-backend.onrender.com"
+    "http://127.0.0.1:8000"
 )
 
-FRONTEND_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "FRONTEND_ALLOWED_ORIGINS",
-        "https://zmuk-frontend.vercel.app"
-    ).split(",")
-]
+FRONTEND_ALLOWED_ORIGINS = os.getenv(
+    "FRONTEND_ALLOWED_ORIGINS",
+    "https://react.zoikomobile.co.uk,http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
 
-CORS_ALLOW_ALL_ORIGINS = False  
-CORS_ALLOW_CREDENTIALS = True
+# CORS_ALLOW_ALL_ORIGINS = True  # removed, CORS_ALLOWED_ORIGINS handles this properly  
 
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -300,10 +290,6 @@ CORS_ALLOW_METHODS = [
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-
-
-
-
 # stripe keys 
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
@@ -311,11 +297,6 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-
-
-
-
 
 # ===============================9999999999999
 # EMAIL / SMTP CONFIGURATION

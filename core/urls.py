@@ -5,7 +5,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 
 def home(request):
-    return HttpResponse("DriverX Django API is running")
+    return HttpResponse("ZoikomobileUK Django API is running")
 
 urlpatterns = [
     path('', home),
@@ -24,8 +24,6 @@ urlpatterns = [
     # path("api/senior-discount/", include("apps.senior_discount.urls")),
     
     path("api/",include("apps.travelpartners.urls")),
-    path("api/v2/order/", include("apps.orders.urls")),
-    path("api/v1/", include("apps.orders.urls")),
     path("api/",include("apps.activation.urls")),
 path("api/", include("apps.contact.urls")),
     path("api/v1/", include("apps.coupons.api_urls")),
@@ -36,7 +34,8 @@ path("api/", include("apps.contact.urls")),
     path('careers/', include('apps.careers.urls')),
     path('search/', include('apps.search.urls')),
     path('api/travel-ecosystem-partner/', include('apps.travel_ecosystem_partner.urls')),
-    path("api/", include("apps.sim_orders.urls")),
+    path("api/v1/sim_orders/", include("apps.sim_orders.urls")),
+    path("api/v1/sims/", include("apps.sims.urls")),  # sim-orders/ (reserve+activate via Transatel), sims/availability/, sims/reserve/, sims/release/
     path("api/", include("apps.enterprise.urls")),
     path('api/', include('apps.integrations.urls')),
     path("api/security/", include("apps.security.urls")),
