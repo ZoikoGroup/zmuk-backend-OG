@@ -29,10 +29,20 @@ class BlogPost(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Set the first time a subscriber notification goes out for this post.
+    # Without this, every admin save of a published post would re-email
+    # everyone. Null means "not yet notified".
+    notification_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="When the new-post email was sent to subscribers.",
+    )
+
     class Meta:
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['status', '-created_at'], name='blog_status_created_idx'),
         ]
 
     def __str__(self):

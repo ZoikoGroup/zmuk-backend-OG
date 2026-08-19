@@ -35,16 +35,33 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY =  os.getenv("SECRET_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "False") == "True"
 
 
-#ALLOWED_HOSTS = []
+# FIXED: the default used to be "localhost,127.0.0.0" — 127.0.0.0 is a network
+# address, not your machine, so http://127.0.0.1:8000 returned HTTP 400 any time
+# the env var was missing. Production hosts added to the default too.
 ALLOWED_HOSTS = os.getenv(
     "ALLOWED_HOSTS",
-    "localhost,127.0.0.0"
+    "localhost,127.0.0.1,api.zoikomobile.co.uk,.onrender.com",
+).split(",")
+
+# FIXED: there used to be a second CSRF_TRUSTED_ORIGINS assignment indented
+# inside the `else:` of the DATABASE_URL block below. On local sqlite it
+# overwrote this list with just ["https://*.onrender.com"], so every POST from
+# localhost:3000 and the Django admin failed CSRF with a 403. Defined once here.
+CSRF_TRUSTED_ORIGINS = os.getenv(
+    "CSRF_TRUSTED_ORIGINS",
+    "https://api.zoikomobile.co.uk,"
+    "https://react.zoikomobile.co.uk,"
+    "https://zmuk-frontend.vercel.app,"
+    "http://localhost:3000,"
+    "http://localhost:3001,"
+    "http://127.0.0.1:3000,"
+    "http://127.0.0.1:8000",
 ).split(",")
 
 # Application definition
@@ -62,7 +79,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'core',
     'apps.blog',
-    "apps.switch", 
+    "apps.switch",
     'apps.business_enterprise',
     'apps.contact',
     'apps.products',
@@ -95,8 +112,9 @@ INSTALLED_APPS = [
     # 'apps.demo_api',
     'django_extensions',
 ]
+
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',          # ← first
+    'corsheaders.middleware.CorsMiddleware',          # must stay first
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -106,23 +124,16 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-# STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
-# DEBUG = True  # removed hardcoded override
 
-CSRF_TRUSTED_ORIGINS = [
-    "https://api.zoikomobile.co.uk",
-    "https://react.zoikomobile.co.uk",
-    "https://zmuk-frontend.vercel.app",
-    "http://localhost:3000",
-    "http://127.0.0.1:8000",
-]
-
+# NOTE: STATICFILES_STORAGE is removed in Django 6.0. Static/media storage is
+# configured via the STORAGES dict at the bottom of this file.
 
 JAZZMIN_SETTINGS = {
     "site_title": " ZoikoMobile Admin",
     "site_header": "Orbit ",
     "site_brand": "ZoikoMobile Admin",
 }
+
 ROOT_URLCONF = 'core.urls'
 
 TEMPLATES = [
@@ -159,15 +170,11 @@ else:
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
-    
-    
-    
-    CSRF_TRUSTED_ORIGINS = os.getenv(
-    "CSRF_TRUSTED_ORIGINS",
-    "https://*.onrender.com"
-).split(",")
-    
-    
+    # FIXED: a CSRF_TRUSTED_ORIGINS assignment used to live here, inside this
+    # else block. Moved to the top of the file. Do not add settings here — this
+    # branch only runs on local sqlite, so anything defined here silently
+    # disappears in production.
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -200,10 +207,6 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
-
-
 CKEDITOR_5_CONFIGS = {
     'default': {
         'toolbar': [
@@ -223,15 +226,19 @@ REST_FRAMEWORK = {
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
-           'rest_framework.filters.OrderingFilter',
+        "rest_framework.filters.OrderingFilter",
     ],
+    # Reminder: this makes EVERY list endpoint return
+    # {count, next, previous, results: [...]} — not a bare array.
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 9,
 }
 
 CORS_ALLOWED_ORIGINS = os.getenv(
     "CORS_ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000"
+    "http://localhost:3000,http://127.0.0.1:3000,"
+    "http://localhost:3001,http://127.0.0.1:3001,"
+    "https://react.zoikomobile.co.uk",
 ).split(",")
 
 # ===============================
@@ -242,13 +249,13 @@ CORS_ALLOWED_ORIGINS = os.getenv(
 # production frontend domain once deployed.
 FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
-    "http://zmuk-frontend.vercel.app"
+    "https://react.zoikomobile.co.uk"
 )
 # BACKEND_URL is what gets embedded in the /verify/... link in the
 # registration email. Using this instead of request.build_absolute_uri()
 # means the link is always reachable, regardless of what host header the
 # request happened to arrive on (e.g. 127.0.0.1:8000, which is unreachable
-# from a phone). Update this to your real API domain once deployed.
+# from a phone).
 BACKEND_URL = os.getenv(
     "BACKEND_URL",
     "http://127.0.0.1:8000"
@@ -259,7 +266,8 @@ FRONTEND_ALLOWED_ORIGINS = os.getenv(
     "https://react.zoikomobile.co.uk,http://localhost:3000,http://127.0.0.1:3000"
 ).split(",")
 
-# CORS_ALLOW_ALL_ORIGINS = True  # removed, CORS_ALLOWED_ORIGINS handles this properly  
+# CORS_ALLOW_ALL_ORIGINS is deliberately not set — CORS_ALLOWED_ORIGINS above
+# handles this, and a wildcard is invalid alongside credentialed requests.
 
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -271,18 +279,15 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
-
-    # ✅ ADD THIS
     "x-frontend-origin",
 ]
-
 
 CORS_ALLOW_METHODS = [
     "GET",
     "POST",
     "PUT",
     "PATCH",
-    "DELETE",  
+    "DELETE",
     "OPTIONS",
 ]
 
@@ -290,7 +295,7 @@ CORS_ALLOW_METHODS = [
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-# stripe keys 
+# stripe keys
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 
@@ -298,15 +303,14 @@ STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-# ===============================9999999999999
+# ===============================
 # EMAIL / SMTP CONFIGURATION
 # ===============================
 
-EMAIL_BACKEND =  os.getenv(
+EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND",
     "django.core.mail.backends.smtp.EmailBackend"
 )
-
 
 EMAIL_HOST = os.getenv("EMAIL_HOST")
 
@@ -329,3 +333,108 @@ EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 
 TEST_RECEIVER_EMAIL = os.getenv("TEST_RECEIVER_EMAIL")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MEDIA / STATIC STORAGE
+# ═════════════════════════════════════════════════════════════════════════════
+# Render's filesystem is ephemeral: files uploaded through the Django admin are
+# deleted on every deploy and restart. Anything users upload has to live in a
+# bucket, not on the container disk.
+#
+# Django 6.0 removed DEFAULT_FILE_STORAGE and STATICFILES_STORAGE — the STORAGES
+# dict below is the only supported form. Setting the old names does nothing.
+#
+# WARNING: do NOT set USE_S3=True until `django-storages` and `boto3` are in
+# requirements.txt AND deployed, or Django crashes on import with
+# ModuleNotFoundError: storages. Leaving USE_S3 unset is the safe default —
+# media is then served from disk by the re_path in core/urls.py.
+
+USE_S3 = os.getenv("USE_S3", "False") == "True"
+
+if USE_S3:
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_STORAGE_BUCKET_NAME = os.getenv("AWS_STORAGE_BUCKET_NAME")
+
+    # Cloudflare R2 / MinIO / DigitalOcean Spaces only. Leave unset for real AWS.
+    AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL") or None
+
+    # The public hostname files are served from, e.g. media.zoikomobile.co.uk
+    # or <bucket>.s3.eu-west-2.amazonaws.com. Without this, django-storages
+    # builds URLs pointing at the private endpoint and images 403.
+    AWS_S3_CUSTOM_DOMAIN = os.getenv("AWS_S3_CUSTOM_DOMAIN") or None
+
+    AWS_S3_REGION_NAME = os.getenv("AWS_S3_REGION_NAME", "auto")
+
+    # Public read URLs with no expiring signature — required, otherwise every
+    # <img> tag would break after a few minutes.
+    AWS_QUERYSTRING_AUTH = False
+
+    # R2 rejects ACLs entirely; modern S3 buckets have them disabled too.
+    AWS_DEFAULT_ACL = None
+
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_S3_OBJECT_PARAMETERS = {"CacheControl": "max-age=86400"}
+
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+        },
+        "staticfiles": {
+            # Do not switch this to Compressed*Manifest* unless collectstatic
+            # runs on deploy — a missing manifest entry raises a 500 on every
+            # page.
+            "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+        },
+    }
+else:
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+        },
+    }
+    
+    
+    
+    
+SITE_NAME = os.getenv("SITE_NAME", "Zoiko Mobile")
+
+# Master switch. Set BLOG_NOTIFY_ON_PUBLISH=False in .env to stop the automatic
+# send and use `python manage.py send_blog_notification <slug>` instead. Do this
+# once you have more than roughly 100 subscribers — see the scaling note in
+# apps/blog/emails.py.
+BLOG_NOTIFY_ON_PUBLISH = os.getenv("BLOG_NOTIFY_ON_PUBLISH", "True") == "True"
+
+# Optional internal address that gets a copy of every notification, so you can
+# confirm the email actually went out. Leave unset to disable.
+BLOG_NOTIFICATION_ADMIN_EMAIL = os.getenv("BLOG_NOTIFICATION_ADMIN_EMAIL") or None
+
+# Messages handed to the SMTP connection per batch. Lower this if your provider
+# rate-limits or drops the connection mid-send.
+BLOG_NOTIFICATION_BATCH_SIZE = int(os.getenv("BLOG_NOTIFICATION_BATCH_SIZE", "40"))
+
+# Without this, a stalled SMTP server holds the admin request open indefinitely
+# and eventually 502s through gunicorn. Django has no default timeout.
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "20"))
+
+# Log email failures instead of losing them silently. Check with:
+#   sudo journalctl -u zoiko-mobile-uk-backend -f
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "simple": {"format": "[{levelname}] {asctime} {name}: {message}", "style": "{"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "simple"},
+    },
+    "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        "apps.blog": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
+    },
+}
