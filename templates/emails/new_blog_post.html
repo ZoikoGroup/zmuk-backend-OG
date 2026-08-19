@@ -1,0 +1,109 @@
+{% comment %}
+Email HTML has to be written like it's 2003: tables for layout, inline styles
+only, no flexbox, no grid, no external stylesheet. Outlook renders with Word's
+engine and Gmail strips <style> blocks in many contexts.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ post.title }}</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6; font-family:Arial, Helvetica, sans-serif;">
+
+  <!-- Preheader: the grey preview text in the inbox list -->
+  <div style="display:none; max-height:0; overflow:hidden; mso-hide:all;">
+    {{ post.excerpt }}
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f3f4f6;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px; background-color:#ffffff; border-radius:12px; overflow:hidden;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#16a34a; padding:24px; text-align:center;">
+              <p style="margin:0; color:#ffffff; font-size:20px; font-weight:bold;">
+                {{ site_name }}
+              </p>
+              <p style="margin:4px 0 0; color:#d1fae5; font-size:13px;">
+                Zoiko&rsquo;s Latest Tech Tea
+              </p>
+            </td>
+          </tr>
+
+          <!-- Featured image -->
+          {% if image_url %}
+          <tr>
+            <td>
+              <a href="{{ post_url }}" style="display:block;">
+                <img src="{{ image_url }}" alt="{{ post.title }}" width="600"
+                     style="display:block; width:100%; max-width:600px; height:auto; border:0;">
+              </a>
+            </td>
+          </tr>
+          {% endif %}
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:28px 28px 8px;">
+              <p style="margin:0 0 6px; color:#6b7280; font-size:12px; text-transform:uppercase; letter-spacing:0.5px;">
+                New article
+              </p>
+              <h1 style="margin:0 0 12px; color:#111827; font-size:22px; line-height:1.35; font-weight:bold;">
+                <a href="{{ post_url }}" style="color:#111827; text-decoration:none;">{{ post.title }}</a>
+              </h1>
+              <p style="margin:0 0 4px; color:#9ca3af; font-size:13px;">
+                {{ post.created_at|date:"j F Y" }}
+              </p>
+              <p style="margin:16px 0 0; color:#4b5563; font-size:15px; line-height:1.65;">
+                {{ post.excerpt }}
+              </p>
+            </td>
+          </tr>
+
+          <!-- CTA -->
+          <tr>
+            <td style="padding:24px 28px 32px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td style="background-color:#e6007e; border-radius:6px;">
+                    <a href="{{ post_url }}"
+                       style="display:inline-block; padding:13px 30px; color:#ffffff; font-size:15px; font-weight:bold; text-decoration:none;">
+                      Read the full article
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#f9fafb; padding:24px 28px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0 0 10px; color:#6b7280; font-size:12px; line-height:1.6;">
+                You are receiving this because you subscribed to updates from
+                {{ site_name }}.
+              </p>
+              <p style="margin:0; color:#9ca3af; font-size:12px;">
+                <a href="{{ unsubscribe_url }}" style="color:#6b7280; text-decoration:underline;">Unsubscribe</a>
+                &nbsp;&middot;&nbsp;
+                <a href="{{ frontend_url }}/blogs" style="color:#6b7280; text-decoration:underline;">All articles</a>
+              </p>
+            </td>
+          </tr>
+
+        </table>
+
+        <p style="margin:16px 0 0; color:#9ca3af; font-size:11px;">
+          &copy; {% now "Y" %} Zoiko Mobile UK. All rights reserved.
+        </p>
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>
