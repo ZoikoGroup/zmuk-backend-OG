@@ -98,6 +98,9 @@ class SimDetailSerializer(serializers.Serializer):
     sim_iccid_masked = serializers.CharField(allow_blank=True)
     sim_status = serializers.CharField()
     rechargeable = serializers.BooleanField()
+    # True only when Transatel reports the SIM as Suspended. Informational —
+    # it does not block the order (see ValidatePhoneView).
+    is_suspended = serializers.BooleanField(required=False, default=False)
 
 
 # ── Order (read) ─────────────────────────────────────────────────────────
@@ -141,8 +144,8 @@ class CreateRechargeSerializer(serializers.Serializer):
     sim_iccid = serializers.CharField(max_length=32, required=False, allow_blank=True, default="")
     customer_name = serializers.CharField(max_length=120, required=False, allow_blank=True)
     customer_email = serializers.EmailField(required=False, allow_blank=True)
-    success_url = serializers.URLField()
-    cancel_url = serializers.URLField()
+    success_url = serializers.URLField(required=False, allow_blank=True, default="")
+    cancel_url = serializers.URLField(required=False, allow_blank=True, default="")
 
     def validate_msisdn(self, value):
         digits = "".join(ch for ch in value if ch.isdigit())
@@ -182,3 +185,26 @@ class CreateRechargeSerializer(serializers.Serializer):
             raise serializers.ValidationError("Provide either product_id or amount.")
 
         return data
+
+
+# ── Inline payment (matches the WordPress modal flow) ────────────────────
+
+class CreatePaymentIntentSerializer(CreateRechargeSerializer):
+    """POST /api/recharge/create-intent/
+
+    Same inputs as CreateRechargeSerializer, but success_url / cancel_url are
+    not needed because the browser never leaves the page — Stripe.js confirms
+    the payment inline, exactly like the WooCommerce modal.
+    """
+    success_url = serializers.URLField(required=False, allow_blank=True, default="")
+    cancel_url = serializers.URLField(required=False, allow_blank=True, default="")
+
+
+class ConfirmPaymentSerializer(serializers.Serializer):
+    """POST /api/recharge/confirm/
+
+    Called by the browser after Stripe.js reports the payment succeeded.
+    The server re-checks the PaymentIntent with Stripe before doing anything.
+    """
+    order_ref = serializers.CharField(max_length=24)
+    payment_intent_id = serializers.CharField(max_length=255)

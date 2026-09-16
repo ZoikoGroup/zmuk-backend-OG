@@ -154,6 +154,25 @@ def reactivate_for_order(order: RechargeOrder, force=False):
         logger.warning("Reactivation skipped for %s: SIM not in inventory", order.order_ref)
         return attempt
 
+    # Already Active on Transatel — calling /reactivate on an Active SIM
+    # returns 400 (confirmed via live test). Nothing to fix, so skip the
+    # call and just mark the order complete.
+    current_status = (sim_qs.first().provisioning_status or "").strip().lower()
+    if current_status == "active":
+        attempt.status = ReactivationAttempt.STATUS_SKIPPED
+        attempt.error = "SIM already Active — reactivate not needed."
+        attempt.save()
+
+        order.status = RechargeOrder.STATUS_COMPLETED
+        order.completed_at = timezone.now()
+        order.save(update_fields=["status", "completed_at", "updated_at"])
+
+        logger.info(
+            "Order %s: SIM already Active — skipped reactivate, marked completed",
+            order.order_ref,
+        )
+        return attempt
+
     # Increment attempt counter
     attempt.attempts += 1
     attempt.rate_plan = rate_plan

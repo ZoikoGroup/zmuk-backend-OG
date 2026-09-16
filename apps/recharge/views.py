@@ -1,5 +1,6 @@
 import logging
 
+from django.conf import settings
 from django.db.models import Sum
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
@@ -11,6 +12,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework import status
 
 from apps.sims.models import Sim
+from apps.sims.transatel.client import APIClient as TransatelClient
+from apps.sims.transatel.exceptions import TransatelAPIError
 
 from .models import RechargeModule, RechargeOrder, RechargeProduct, TransatelLog
 from .serializers import (
@@ -18,6 +21,8 @@ from .serializers import (
     RechargeOrderSerializer,
     RechargeProductSerializer,
     CreateRechargeSerializer,
+    CreatePaymentIntentSerializer,
+    ConfirmPaymentSerializer,
     PhoneValidateSerializer,
     SimDetailSerializer,
     mask_identifier,
@@ -34,11 +39,13 @@ logger = logging.getLogger("apps.recharge")
 class ValidatePhoneView(APIView):
     """POST /api/recharge/validate-phone/
 
-    Look up a phone number in the local SIM inventory. Returns masked SIM
-    details if found, matching the WordPress recharge page behaviour.
+    The complete flow:
+      1. Phone number → local DB → find ICCID
+      2. ICCID → LIVE Transatel API call → get real current status
+      3. Based on real status → decide rechargeable or not
+      4. Log everything in TransatelLog
 
     Request:  { "phone_number": "+447421118918" }
-    Response: { "success": true, "message": "...", "sim": { ... } }
     """
     permission_classes = [AllowAny]
 
@@ -47,7 +54,7 @@ class ValidatePhoneView(APIView):
         serializer.is_valid(raise_exception=True)
         phone = serializer.validated_data["phone_number"]
 
-        # Search local SIM inventory by all MSISDN variants
+        # ── Step 1: Phone → local DB → ICCID ────────────────────────────
         variants = phone_variants(phone, country_code="44")
         sim = Sim.objects.filter(msisdn__in=variants).first()
 
@@ -57,16 +64,83 @@ class ValidatePhoneView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Determine if rechargeable (Suspended SIMs only, matching WordPress logic)
-        sim_status = (sim.provisioning_status or "").strip()
-        rechargeable = sim_status.lower() == "suspended"
+        iccid = sim.serial_number or sim.iccid
+        if not iccid:
+            return Response(
+                {"success": False, "message": "SIM found but has no ICCID stored."},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
-        if rechargeable:
-            message = "Phone number validated successfully!"
+        # ── Step 2: ICCID → LIVE Transatel API → real status ────────────
+        live_status = None
+        live_data = None
+        transatel_error = None
+        transatel_http_status = None
+
+        try:
+            client = TransatelClient()
+            endpoint = (
+                f"/connectivity-management/subscribers/api/subscribers"
+                f"/sim-serial/{iccid}"
+            )
+            result = client.get(endpoint)
+            transatel_http_status = result.get("status_code", 0)
+            live_data = result.get("data", {})
+
+            if result.get("success"):
+                # Extract status from the live response.
+                # Transatel may use different keys — try the known ones.
+                live_status = (
+                    live_data.get("simStatus")
+                    or live_data.get("status")
+                    or live_data.get("subscriberStatus")
+                    or live_data.get("provisioningStatus")
+                    or ""
+                ).strip()
+            else:
+                transatel_error = live_data.get("detail") or live_data.get(
+                    "title"
+                ) or f"HTTP {transatel_http_status}"
+
+        except TransatelAPIError as exc:
+            transatel_error = str(exc)
+            logger.warning(
+                "Transatel live lookup failed for %s: %s", iccid, exc
+            )
+        except Exception as exc:
+            transatel_error = str(exc)
+            logger.exception(
+                "Unexpected error during Transatel lookup for %s", iccid
+            )
+
+        # ── Step 3: Decide rechargeable based on LIVE status ─────────────
+        # Use live status if we got it, fall back to local DB status.
+        if live_status:
+            sim_status = live_status
+            status_source = "transatel_live"
         else:
+            sim_status = (sim.provisioning_status or "").strip() or "Unknown"
+            status_source = "local_db"
+
+        is_suspended = sim_status.lower() == "suspended"
+
+        # If live status differs from local, update local DB to stay in sync.
+        if live_status and live_status != (sim.provisioning_status or ""):
+            sim.provisioning_status = live_status
+            sim.save(update_fields=["provisioning_status"])
+
+        rechargeable = True
+        message = "Phone number validated successfully!"
+
+        # Optional hard block (set RECHARGE_BLOCK_NON_SUSPENDED = True)
+        block_non_suspended = getattr(
+            settings, "RECHARGE_BLOCK_NON_SUSPENDED", False
+        )
+        if block_non_suspended and not is_suspended:
+            rechargeable = False
             message = (
-                f"This SIM is {sim_status}; recharge is only available "
-                f"for suspended SIMs."
+                f"This SIM is currently {sim_status}. "
+                f"Recharge is available for suspended SIMs."
             )
 
         sim_data = {
@@ -75,25 +149,38 @@ class ValidatePhoneView(APIView):
             "sim_iccid_masked": mask_identifier(sim.iccid) if sim.iccid else "",
             "sim_status": sim_status,
             "rechargeable": rechargeable,
+            "is_suspended": is_suspended,
         }
 
-        # Log the validation
+        # ── Step 4: Log everything ───────────────────────────────────────
         TransatelLog.objects.create(
             action="validate_phone",
             msisdn_masked=mask_identifier(phone),
-            sim_serial_masked=mask_identifier(sim.serial_number or sim.iccid),
-            success=True,
-            response_body={"status": sim_status, "rechargeable": rechargeable},
+            sim_serial_masked=mask_identifier(iccid),
+            success=live_status is not None,
+            response_body={
+                "status_source": status_source,
+                "live_status": live_status,
+                "local_status": sim.provisioning_status,
+                "rechargeable": rechargeable,
+                "transatel_error": transatel_error,
+                "transatel_http_status": transatel_http_status,
+            },
         )
 
         return Response({
             "success": True,
             "message": message,
             "sim": SimDetailSerializer(sim_data).data,
-            # Frontend needs the raw serial to pass back when creating the order.
-            # In production, use a signed token instead (see security note below).
             "sim_serial": sim.serial_number or sim.iccid,
             "sim_iccid": sim.iccid or "",
+            "status_source": status_source,
+            "transatel_live": {
+                "checked": live_status is not None,
+                "status": live_status,
+                "error": transatel_error,
+                "raw": live_data if live_data and live_status else None,
+            },
         })
 
 
@@ -246,6 +333,236 @@ class CreateRechargeView(APIView):
             {"order_ref": order.order_ref, "checkout_url": session.url},
             status=status.HTTP_201_CREATED,
         )
+
+
+# ── Inline Payment: Create PaymentIntent ─────────────────────────────────
+
+class CreatePaymentIntentView(APIView):
+    """POST /api/recharge/create-intent/
+
+    Creates the order and a Stripe PaymentIntent for INLINE payment — the
+    browser never leaves the page. This mirrors the WordPress modal flow
+    (plan grid -> Google Pay / Card -> Pay Now -> Success), instead of
+    redirecting to Stripe's hosted Checkout page.
+
+    Request:
+        {
+          "msisdn": "+447421118918",
+          "module": "recharge",
+          "product_id": 1,
+          "sim_serial": "8944122666...",
+          "sim_iccid": "8944122666...",
+          "customer_email": "you@example.com"
+        }
+
+    Response:
+        {
+          "order_ref": "RC-XXXXXXXXXX",
+          "payment_intent_id": "pi_...",
+          "client_secret": "pi_..._secret_...",
+          "amount": 1214,
+          "amount_display": "\u00a312.14",
+          "currency": "gbp",
+          "publishable_key": "pk_test_..."
+        }
+
+    The browser then calls stripe.confirmPayment({ clientSecret }) and, on
+    success, POSTs to /api/recharge/confirm/.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = CreatePaymentIntentSerializer(data=request.data, context={})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order = RechargeOrder.objects.create(
+            module=data["module"],
+            msisdn=data["msisdn"],
+            sim_serial=data.get("sim_serial", "") or "",
+            sim_iccid=data.get("sim_iccid", "") or "",
+            customer_name=data.get("customer_name", "") or "",
+            customer_email=data.get("customer_email", "") or "",
+            product=data.get("_product"),
+            amount_pence=data["_amount_pence"],
+            currency="gbp",
+            status=RechargeOrder.STATUS_PENDING,
+        )
+
+        try:
+            intent = services.create_payment_intent(
+                order, customer_email=data.get("customer_email", "") or ""
+            )
+        except services.StripeNotConfigured as exc:
+            order.status = RechargeOrder.STATUS_FAILED
+            order.save(update_fields=["status"])
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            order.status = RechargeOrder.STATUS_FAILED
+            order.save(update_fields=["status"])
+            logger.exception("PaymentIntent creation failed for %s", order.order_ref)
+            return Response(
+                {"detail": f"Payment could not be started: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        order.stripe_payment_intent_id = intent.id
+        order.save(update_fields=["stripe_payment_intent_id"])
+
+        return Response(
+            {
+                "success": True,
+                "order_ref": order.order_ref,
+                "payment_intent_id": intent.id,
+                "client_secret": intent.client_secret,
+                "amount": order.amount_pence,
+                "amount_display": order.amount_display,
+                "currency": order.currency,
+                "publishable_key": getattr(settings, "STRIPE_PUBLISHABLE_KEY", "") or "",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+# ── Inline Payment: Confirm + Reactivate ─────────────────────────────────
+
+class ConfirmPaymentView(APIView):
+    """POST /api/recharge/confirm/
+
+    Called by the browser right after Stripe.js reports the payment
+    succeeded. The server re-verifies the PaymentIntent with Stripe (never
+    trusting the client), marks the order paid, then runs the Transatel
+    reactivation SYNCHRONOUSLY so the modal can show "Success! Order Number:
+    RC-XXXX" straight away — same as the WordPress flow.
+
+    The Stripe webhook remains the safety net: if the browser closes before
+    this call lands, the webhook still completes the order.
+
+    Request:  { "order_ref": "RC-XXXXXXXXXX", "payment_intent_id": "pi_..." }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ConfirmPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order_ref = serializer.validated_data["order_ref"]
+        intent_id = serializer.validated_data["payment_intent_id"]
+
+        order = RechargeOrder.objects.filter(order_ref=order_ref).first()
+        if not order:
+            return Response(
+                {"success": False, "message": "Order not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # The intent must belong to this order — stops someone confirming
+        # order A with a payment that actually paid for order B.
+        if order.stripe_payment_intent_id and order.stripe_payment_intent_id != intent_id:
+            return Response(
+                {"success": False, "message": "Payment does not match this order."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Already finished (webhook got here first) — return the same shape.
+        if order.status == RechargeOrder.STATUS_COMPLETED:
+            return Response(self._success_payload(order))
+
+        # ── Verify with Stripe ──
+        try:
+            intent = services.retrieve_payment_intent(intent_id)
+        except services.StripeNotConfigured as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            logger.exception("Could not retrieve PaymentIntent for %s", order_ref)
+            return Response(
+                {"success": False, "message": f"Could not verify payment: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if intent.status != "succeeded":
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Payment not completed (status: {intent.status}).",
+                    "payment_status": intent.status,
+                },
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        # Amount check — the intent must have charged what we asked for.
+        if int(intent.amount) != int(order.amount_pence):
+            logger.error(
+                "Amount mismatch for %s: intent=%s order=%s",
+                order_ref, intent.amount, order.amount_pence,
+            )
+            return Response(
+                {"success": False, "message": "Payment amount does not match the order."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ── Mark paid ──
+        if order.status == RechargeOrder.STATUS_PENDING:
+            order.status = RechargeOrder.STATUS_PROCESSING
+            order.stripe_payment_intent_id = intent_id
+            order.paid_at = timezone.now()
+            order.save(update_fields=[
+                "status", "stripe_payment_intent_id", "paid_at", "updated_at",
+            ])
+
+        # ── Reactivate (idempotent — safe if the webhook also runs) ──
+        attempt = None
+        if order.sim_serial:
+            try:
+                attempt = reactivation_service.reactivate_for_order(order)
+            except Exception:
+                logger.exception("Reactivation error for %s — queued for retry", order_ref)
+        else:
+            # No SIM attached (e.g. a plain top-up) — nothing to reactivate.
+            order.status = RechargeOrder.STATUS_COMPLETED
+            order.completed_at = timezone.now()
+            order.save(update_fields=["status", "completed_at", "updated_at"])
+
+        order.refresh_from_db()
+        payload = self._success_payload(order, attempt)
+
+        # Payment succeeded even if reactivation did not — say so plainly
+        # rather than telling the customer the whole thing failed.
+        if attempt and attempt.status != "success":
+            payload["success"] = True
+            payload["reactivation_pending"] = True
+            payload["message"] = (
+                "Payment successful. SIM reactivation is still processing — "
+                "it will be retried automatically."
+            )
+
+        return Response(payload)
+
+    @staticmethod
+    def _success_payload(order, attempt=None):
+        if attempt is None:
+            attempt = order.reactivation_attempts.order_by("-updated_at").first()
+        return {
+            "success": True,
+            "message": "Payment successful! Your recharge has been processed.",
+            "order_ref": order.order_ref,
+            "order_number": order.order_ref,
+            "status": order.status,
+            "status_label": order.get_status_display(),
+            "msisdn": order.msisdn,
+            "amount": order.amount_display,
+            "product_name": order.product.name if order.product else None,
+            "reactivation_status": attempt.status if attempt else None,
+            "reactivation_transaction_id": (
+                attempt.provider_transaction_id if attempt else None
+            ),
+            "reactivation_pending": False,
+        }
 
 
 # ── Stripe Webhook ───────────────────────────────────────────────────────
