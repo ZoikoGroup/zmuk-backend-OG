@@ -8,6 +8,8 @@ from .views import (
     RechargeOrdersView,
     RechargeOrderDetailView,
     CreateRechargeView,
+    CreatePaymentIntentView,
+    ConfirmPaymentView,
     TransatelLogsView,
     stripe_webhook,
 )
@@ -20,7 +22,14 @@ urlpatterns = [
     path("products/", RechargeProductsView.as_view(), name="recharge_products"),
 
     # Order creation + payment (Steps 3-4)
+    #
+    # Two payment modes:
+    #   create/         -> Stripe Checkout, redirects away to Stripe's page
+    #   create-intent/  -> Stripe PaymentIntent, pays INLINE on your own page
+    #                      (this is the one that matches the WordPress modal)
     path("create/", CreateRechargeView.as_view(), name="recharge_create"),
+    path("create-intent/", CreatePaymentIntentView.as_view(), name="recharge_create_intent"),
+    path("confirm/", ConfirmPaymentView.as_view(), name="recharge_confirm"),
 
     # Order lookup
     path("orders/", RechargeOrdersView.as_view(), name="recharge_orders"),
