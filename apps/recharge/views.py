@@ -306,7 +306,7 @@ class RechargeProductsView(APIView):
 
 class RechargeModulesView(APIView):
     """GET /api/recharge/modules/"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         mods = RechargeModule.objects.filter(enabled=True)

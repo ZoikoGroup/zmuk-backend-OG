@@ -98,9 +98,9 @@ class SimDetailSerializer(serializers.Serializer):
     sim_iccid_masked = serializers.CharField(allow_blank=True)
     sim_status = serializers.CharField()
     rechargeable = serializers.BooleanField()
-    # True only when Transatel reports the SIM as Suspended. Informational —
-    # it does not block the order (see ValidatePhoneView).
     is_suspended = serializers.BooleanField(required=False, default=False)
+    is_active = serializers.BooleanField(required=False, default=False)
+    needs_reactivation = serializers.BooleanField(required=False, default=False)
 
 
 # ── Order (read) ─────────────────────────────────────────────────────────

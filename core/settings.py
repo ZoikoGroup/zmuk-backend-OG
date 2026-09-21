@@ -592,3 +592,35 @@ LOGGING = {
         },
     },
 }
+# =============================================================================
+# PRODUCTION SECURITY (only active when DEBUG=False)
+# =============================================================================
+
+if not DEBUG:
+    # HTTPS enforcement
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
+    # Cookie security
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+
+    # Prevent content-type sniffing
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+
+    # Clickjacking protection
+    X_FRAME_OPTIONS = "DENY"
+
+# =============================================================================
+# RECHARGE BEHAVIOUR
+# =============================================================================
+
+# Set True to block non-suspended SIMs from proceeding to recharge.
+# Default False = matches WordPress: lets everything through, gates at
+# reactivation time instead.
+RECHARGE_BLOCK_NON_SUSPENDED = os.getenv(
+    "RECHARGE_BLOCK_NON_SUSPENDED", "False"
+) == "True"

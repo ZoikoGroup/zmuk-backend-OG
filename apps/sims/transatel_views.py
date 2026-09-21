@@ -25,7 +25,14 @@ import logging
 
 from django.conf import settings
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.throttling import AnonRateThrottle
+
+
+class TransatelAdminThrottle(AnonRateThrottle):
+    """Rate limit for admin Transatel endpoints to protect API quota."""
+    rate = '30/minute'
+
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -87,7 +94,8 @@ class LiveLookupByPhoneView(APIView):
     This is NOT a local DB lookup — step 1 is local, but step 2 is a real
     network call to api.transatel.com.
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request, msisdn):
         msisdn = msisdn.strip()
@@ -149,7 +157,8 @@ class SubscriberBySerialView(APIView):
     Returns the LIVE subscriber record: connectivity status, MSISDN,
     active plan, data usage, account metadata.
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request, iccid):
         endpoint = f"/connectivity-management/subscribers/api/subscribers/sim-serial/{iccid}"
@@ -168,7 +177,8 @@ class EsimBySerialView(APIView):
 
     Returns eSIM profile details and optionally the full status-change history.
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request, iccid):
         history = request.query_params.get("history", "true").lower() == "true"
@@ -189,7 +199,8 @@ class SearchSimsView(APIView):
 
     Searches the SIM inventory on Transatel's side. Pass query params through.
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request):
         endpoint = "/sim-management/sims/api/sims"
@@ -211,7 +222,8 @@ class ReactivateSimView(APIView):
 
     ⚠️ THIS ACTUALLY CHANGES THE SIM ON THE LIVE NETWORK.
     """
-    permission_classes = [AllowAny]  # TODO: MUST restrict to admin before production
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def post(self, request, iccid):
         rate_plan = request.data.get(
@@ -234,7 +246,8 @@ class SuspendSimView(APIView):
 
     ⚠️ THIS ACTUALLY SUSPENDS THE SIM ON THE LIVE NETWORK.
     """
-    permission_classes = [AllowAny]  # TODO: MUST restrict to admin before production
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def post(self, request, iccid):
         endpoint = f"/connectivity-management/subscribers/api/subscribers/sim-serial/{iccid}/suspend"
@@ -251,7 +264,8 @@ class RefreshConnectivityView(APIView):
 
     Calls: POST /connectivity-management/subscribers/api/subscribers/sim-serial/{iccid}/refresh
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def post(self, request, iccid):
         endpoint = f"/connectivity-management/subscribers/api/subscribers/sim-serial/{iccid}/refresh"
@@ -270,7 +284,8 @@ class UsageCdrView(APIView):
 
     Returns call detail records / data usage for the SIM.
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request, iccid):
         endpoint = f"/network-usage/cdrs/api/subscribers/sim-serial/{iccid}/cdrs"
@@ -289,7 +304,8 @@ class ReadSmsView(APIView):
 
     Calls: GET /network-sms/sms/api/subscribers/sim-serial/{iccid}/sms
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request, iccid):
         endpoint = f"/network-sms/sms/api/subscribers/sim-serial/{iccid}/sms"
@@ -309,7 +325,8 @@ class SendSmsView(APIView):
     Calls: POST /network-sms/sms/api/subscribers/sim-serial/{iccid}/sms
     Body: { "to": "+44...", "message": "Hello" }
     """
-    permission_classes = [AllowAny]  # TODO: MUST restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def post(self, request, iccid):
         endpoint = f"/network-sms/sms/api/subscribers/sim-serial/{iccid}/sms"
@@ -328,7 +345,8 @@ class AccountInfoView(APIView):
 
     Returns info about the authenticated API user (zoiko.mobile).
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request):
         endpoint = "/user-management/users/api/users/me"
@@ -345,7 +363,8 @@ class ListWebhooksView(APIView):
 
     Calls: GET /webhooks/api/webhooks
     """
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def get(self, request):
         endpoint = "/webhooks/api/webhooks"
@@ -359,7 +378,8 @@ class CreateWebhookView(APIView):
     Calls: POST /webhooks/api/webhooks
     Body: { "url": "https://...", "events": ["sim.status.changed"] }
     """
-    permission_classes = [AllowAny]  # TODO: MUST restrict to admin
+    permission_classes = [IsAdminUser]
+    throttle_classes = [TransatelAdminThrottle]
 
     def post(self, request):
         endpoint = "/webhooks/api/webhooks"
