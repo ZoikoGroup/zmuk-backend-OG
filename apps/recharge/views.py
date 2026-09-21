@@ -8,7 +8,20 @@ from django.views.decorators.csrf import csrf_exempt
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
+from rest_framework.throttling import AnonRateThrottle
+
+
+class TransatelLookupThrottle(AnonRateThrottle):
+    """Tight rate limit for endpoints that trigger live Transatel API calls.
+    Each validate-phone/ call makes 2 Transatel requests — protect the quota."""
+    rate = '30/minute'
+
+
+class PaymentThrottle(AnonRateThrottle):
+    """Rate limit payment creation to prevent abuse."""
+    rate = '10/minute'
+
 from rest_framework import status
 
 from apps.sims.models import Sim
@@ -39,149 +52,233 @@ logger = logging.getLogger("apps.recharge")
 class ValidatePhoneView(APIView):
     """POST /api/recharge/validate-phone/
 
-    The complete flow:
-      1. Phone number → local DB → find ICCID
-      2. ICCID → LIVE Transatel API call → get real current status
-      3. Based on real status → decide rechargeable or not
-      4. Log everything in TransatelLog
+    The REAL flow — calls Transatel directly, no local DB dependency:
+
+      1. Normalize phone number to international digits (447421118918)
+      2. Call Transatel GET /subscribers/msisdn/{msisdn} → get simSerial + live status
+      3. Optionally call GET /subscribers/sim-serial/{simSerial} for full detail
+      4. Based on live status → determine rechargeable
+      5. Log everything in TransatelLog
+      6. Sync local sims_sim table with live data (cache, not source of truth)
 
     Request:  { "phone_number": "+447421118918" }
     """
     permission_classes = [AllowAny]
+    throttle_classes = [TransatelLookupThrottle]
 
     def post(self, request):
         serializer = PhoneValidateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         phone = serializer.validated_data["phone_number"]
 
-        # ── Step 1: Phone → local DB → ICCID ────────────────────────────
-        variants = phone_variants(phone, country_code="44")
-        sim = Sim.objects.filter(msisdn__in=variants).first()
+        # ── Step 1: Normalize to international digits ────────────────────
+        digits = phone.lstrip("+").replace(" ", "").replace("-", "")
+        if digits.startswith("0"):
+            digits = "44" + digits[1:]
+        # If they typed just the local part without country code
+        if len(digits) <= 10 and not digits.startswith("44"):
+            digits = "44" + digits
 
-        if not sim:
+        # ── Step 2: Call Transatel /subscribers/msisdn/{msisdn} ──────────
+        import time
+        client = TransatelClient()
+        msisdn_endpoint = (
+            f"/connectivity-management/subscribers/api/subscribers"
+            f"/msisdn/{digits}"
+        )
+
+        start = time.time()
+        transatel_error = None
+        msisdn_data = None
+        sim_serial = None
+        live_status = None
+        full_subscriber = None
+
+        log_entry = TransatelLog(
+            action="validate_phone_live",
+            msisdn_masked=mask_identifier(phone),
+            request_url=f"{{base}}{msisdn_endpoint}",
+            request_method="GET",
+        )
+
+        try:
+            result = client.get(msisdn_endpoint)
+            duration = int((time.time() - start) * 1000)
+            log_entry.response_status = result.get("status_code", 0)
+            log_entry.duration_ms = duration
+
+            if result.get("success"):
+                msisdn_data = result.get("data", {})
+                sim_serial = msisdn_data.get("simSerial", "")
+                live_status = (
+                    msisdn_data.get("status")
+                    or msisdn_data.get("simStatus")
+                    or ""
+                ).strip()
+                log_entry.sim_serial_masked = mask_identifier(sim_serial)
+                log_entry.response_body = msisdn_data
+                log_entry.success = True
+            else:
+                error_data = result.get("data", {})
+                transatel_error = (
+                    error_data.get("detail")
+                    or error_data.get("title")
+                    or f"HTTP {result.get('status_code', 'unknown')}"
+                )
+                log_entry.response_body = error_data
+                log_entry.error_message = transatel_error
+                log_entry.success = False
+
+        except TransatelAPIError as exc:
+            duration = int((time.time() - start) * 1000)
+            transatel_error = str(exc)
+            log_entry.response_status = getattr(exc, "status_code", 0)
+            log_entry.error_message = transatel_error
+            log_entry.success = False
+            log_entry.duration_ms = duration
+            logger.warning("Transatel MSISDN lookup failed for %s: %s", digits, exc)
+
+        except Exception as exc:
+            duration = int((time.time() - start) * 1000)
+            transatel_error = str(exc)
+            log_entry.error_message = transatel_error
+            log_entry.success = False
+            log_entry.duration_ms = duration
+            logger.exception("Unexpected error during Transatel MSISDN lookup")
+
+        log_entry.save()
+
+        # If Transatel couldn't find the number
+        if not sim_serial:
             return Response(
-                {"success": False, "message": "No SIM found for this phone number."},
+                {
+                    "success": False,
+                    "message": "Phone number not found on the network.",
+                    "transatel_error": transatel_error,
+                },
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        iccid = sim.serial_number or sim.iccid
-        if not iccid:
-            return Response(
-                {"success": False, "message": "SIM found but has no ICCID stored."},
-                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
+        # ── Step 3: Get full subscriber detail ───────────────────────────
+        serial_endpoint = (
+            f"/connectivity-management/subscribers/api/subscribers"
+            f"/sim-serial/{sim_serial}"
+        )
 
-        # ── Step 2: ICCID → LIVE Transatel API → real status ────────────
-        live_status = None
-        live_data = None
-        transatel_error = None
-        transatel_http_status = None
+        start2 = time.time()
+        log_entry2 = TransatelLog(
+            action="get_subscriber_detail",
+            sim_serial_masked=mask_identifier(sim_serial),
+            msisdn_masked=mask_identifier(phone),
+            request_url=f"{{base}}{serial_endpoint}",
+            request_method="GET",
+        )
 
         try:
-            client = TransatelClient()
-            endpoint = (
-                f"/connectivity-management/subscribers/api/subscribers"
-                f"/sim-serial/{iccid}"
-            )
-            result = client.get(endpoint)
-            transatel_http_status = result.get("status_code", 0)
-            live_data = result.get("data", {})
+            result2 = client.get(serial_endpoint)
+            duration2 = int((time.time() - start2) * 1000)
+            log_entry2.response_status = result2.get("status_code", 0)
+            log_entry2.duration_ms = duration2
 
-            if result.get("success"):
-                # Extract status from the live response.
-                # Transatel may use different keys — try the known ones.
-                live_status = (
-                    live_data.get("simStatus")
-                    or live_data.get("status")
-                    or live_data.get("subscriberStatus")
-                    or live_data.get("provisioningStatus")
+            if result2.get("success"):
+                full_subscriber = result2.get("data", {})
+                # Use the more detailed status if available
+                detailed_status = (
+                    full_subscriber.get("status")
+                    or full_subscriber.get("simStatus")
                     or ""
                 ).strip()
+                if detailed_status:
+                    live_status = detailed_status
+                log_entry2.response_body = full_subscriber
+                log_entry2.success = True
             else:
-                transatel_error = live_data.get("detail") or live_data.get(
-                    "title"
-                ) or f"HTTP {transatel_http_status}"
+                log_entry2.success = False
+                log_entry2.error_message = str(result2.get("data", {}))
 
-        except TransatelAPIError as exc:
-            transatel_error = str(exc)
-            logger.warning(
-                "Transatel live lookup failed for %s: %s", iccid, exc
-            )
         except Exception as exc:
-            transatel_error = str(exc)
-            logger.exception(
-                "Unexpected error during Transatel lookup for %s", iccid
-            )
+            duration2 = int((time.time() - start2) * 1000)
+            log_entry2.error_message = str(exc)
+            log_entry2.success = False
+            log_entry2.duration_ms = duration2
 
-        # ── Step 3: Decide rechargeable based on LIVE status ─────────────
-        # Use live status if we got it, fall back to local DB status.
-        if live_status:
-            sim_status = live_status
-            status_source = "transatel_live"
-        else:
-            sim_status = (sim.provisioning_status or "").strip() or "Unknown"
-            status_source = "local_db"
+        log_entry2.save()
 
+        # ── Step 4: Determine rechargeable ───────────────────────────────
+        sim_status = live_status or "Unknown"
         is_suspended = sim_status.lower() == "suspended"
+        is_active = sim_status.lower() == "active"
 
-        # If live status differs from local, update local DB to stay in sync.
-        if live_status and live_status != (sim.provisioning_status or ""):
-            sim.provisioning_status = live_status
-            sim.save(update_fields=["provisioning_status"])
+        # Per the corrected handover doc and confirmed live testing:
+        # - Active SIMs: reactivation not needed, but top-up/plan change may apply
+        # - Suspended SIMs: reactivation needed after payment
+        # - Terminated SIMs: cannot be recharged
+        rechargeable = sim_status.lower() in ("active", "suspended")
+        needs_reactivation = is_suspended
 
-        rechargeable = True
-        message = "Phone number validated successfully!"
-
-        # Optional hard block (set RECHARGE_BLOCK_NON_SUSPENDED = True)
-        block_non_suspended = getattr(
-            settings, "RECHARGE_BLOCK_NON_SUSPENDED", False
-        )
-        if block_non_suspended and not is_suspended:
+        if sim_status.lower() == "terminated":
+            message = "This SIM has been terminated and cannot be recharged."
             rechargeable = False
-            message = (
-                f"This SIM is currently {sim_status}. "
-                f"Recharge is available for suspended SIMs."
-            )
+        elif is_active:
+            message = "Phone number validated. SIM is active — plan top-up available."
+        elif is_suspended:
+            message = "Phone number validated. SIM is suspended — recharge will reactivate."
+        else:
+            message = f"Phone number found. Current status: {sim_status}."
 
+        # ── Step 5: Sync local DB (cache, not source of truth) ───────────
+        try:
+            variants = phone_variants(phone, country_code="44")
+            sim_obj = Sim.objects.filter(msisdn__in=variants).first()
+            if sim_obj:
+                sim_obj.provisioning_status = live_status
+                if sim_serial:
+                    sim_obj.serial_number = sim_serial
+                sim_obj.save(update_fields=["provisioning_status", "serial_number"])
+            else:
+                # Create a local cache entry from live data
+                Sim.objects.create(
+                    msisdn=phone,
+                    serial_number=sim_serial,
+                    iccid=sim_serial,
+                    provisioning_status=live_status or "",
+                    imsi=full_subscriber.get("primaryImsi", "") if full_subscriber else "",
+                )
+        except Exception as exc:
+            logger.warning("Could not sync local SIM cache: %s", exc)
+
+        # ── Step 6: Build response ───────────────────────────────────────
         sim_data = {
-            "phone_number": sim.msisdn or phone,
-            "sim_card_id_masked": mask_identifier(sim.serial_number or sim.iccid),
-            "sim_iccid_masked": mask_identifier(sim.iccid) if sim.iccid else "",
+            "phone_number": phone,
+            "sim_card_id_masked": mask_identifier(sim_serial),
+            "sim_iccid_masked": mask_identifier(sim_serial),
             "sim_status": sim_status,
             "rechargeable": rechargeable,
             "is_suspended": is_suspended,
+            "is_active": is_active,
+            "needs_reactivation": needs_reactivation,
         }
 
-        # ── Step 4: Log everything ───────────────────────────────────────
-        TransatelLog.objects.create(
-            action="validate_phone",
-            msisdn_masked=mask_identifier(phone),
-            sim_serial_masked=mask_identifier(iccid),
-            success=live_status is not None,
-            response_body={
-                "status_source": status_source,
-                "live_status": live_status,
-                "local_status": sim.provisioning_status,
-                "rechargeable": rechargeable,
-                "transatel_error": transatel_error,
-                "transatel_http_status": transatel_http_status,
-            },
-        )
-
-        return Response({
+        response_payload = {
             "success": True,
             "message": message,
             "sim": SimDetailSerializer(sim_data).data,
-            "sim_serial": sim.serial_number or sim.iccid,
-            "sim_iccid": sim.iccid or "",
-            "status_source": status_source,
+            "sim_serial": sim_serial,
+            "sim_iccid": sim_serial,
+            "status_source": "transatel_live",
             "transatel_live": {
-                "checked": live_status is not None,
+                "checked": True,
                 "status": live_status,
-                "error": transatel_error,
-                "raw": live_data if live_data and live_status else None,
+                "error": None,
+                "rate_plan": msisdn_data.get("ratePlan") if msisdn_data else None,
+                "service_profile": msisdn_data.get("serviceProfile") if msisdn_data else None,
+                "activation_date": msisdn_data.get("activationDate") if msisdn_data else None,
+                "group": msisdn_data.get("group") if msisdn_data else None,
+                "full_subscriber": full_subscriber,
             },
-        })
+        }
+
+        return Response(response_payload)
 
 
 # ── Recharge Products / Plans ────────────────────────────────────────────
@@ -212,7 +309,7 @@ class RechargeModulesView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        mods = RechargeModule.objects.all()
+        mods = RechargeModule.objects.filter(enabled=True)
         return Response(RechargeModuleSerializer(mods, many=True).data)
 
 
@@ -220,7 +317,7 @@ class RechargeModulesView(APIView):
 
 class RechargeStatsView(APIView):
     """GET /api/recharge/stats/"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         completed = RechargeOrder.objects.filter(status=RechargeOrder.STATUS_COMPLETED)
@@ -242,7 +339,7 @@ class RechargeStatsView(APIView):
 
 class RechargeOrdersView(APIView):
     """GET /api/recharge/orders/"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         limit = int(request.query_params.get("limit", 20))
@@ -254,7 +351,7 @@ class RechargeOrdersView(APIView):
 
 class RechargeOrderDetailView(APIView):
     """GET /api/recharge/orders/<order_ref>/"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAdminUser]
 
     def get(self, request, order_ref):
         order = RechargeOrder.objects.filter(order_ref=order_ref).first()
@@ -274,6 +371,42 @@ class RechargeOrderDetailView(APIView):
         return Response({"success": True, "order": data})
 
 
+# ── Public Order Status (for success page — no admin required) ───────────
+
+class RechargeOrderStatusView(APIView):
+    """GET /api/recharge/order-status/<order_ref>/
+
+    Public endpoint returning limited order info for the success/confirmation
+    page. Only exposes what the customer needs to see — no internal IDs or
+    admin data.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, order_ref):
+        order = RechargeOrder.objects.filter(order_ref=order_ref).first()
+        if not order:
+            return Response(
+                {"success": False, "message": "Order not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        attempt = order.reactivation_attempts.order_by("-updated_at").first()
+
+        return Response({
+            "success": True,
+            "order": {
+                "order_ref": order.order_ref,
+                "msisdn": order.msisdn,
+                "amount": order.amount_display,
+                "status": order.status,
+                "status_label": order.get_status_display(),
+                "product_name": order.product.name if order.product else None,
+                "reactivation_status": attempt.status if attempt else None,
+                "created_at": order.created_at.isoformat(),
+            },
+        })
+
+
 # ── Create Order ─────────────────────────────────────────────────────────
 
 class CreateRechargeView(APIView):
@@ -282,6 +415,7 @@ class CreateRechargeView(APIView):
     Creates order + Stripe Checkout Session. Returns {order_ref, checkout_url}.
     """
     permission_classes = [AllowAny]
+    throttle_classes = [PaymentThrottle]
 
     def post(self, request):
         serializer = CreateRechargeSerializer(data=request.data, context={})
@@ -370,6 +504,7 @@ class CreatePaymentIntentView(APIView):
     success, POSTs to /api/recharge/confirm/.
     """
     permission_classes = [AllowAny]
+    throttle_classes = [PaymentThrottle]
 
     def post(self, request):
         serializer = CreatePaymentIntentSerializer(data=request.data, context={})
@@ -444,6 +579,7 @@ class ConfirmPaymentView(APIView):
     Request:  { "order_ref": "RC-XXXXXXXXXX", "payment_intent_id": "pi_..." }
     """
     permission_classes = [AllowAny]
+    throttle_classes = [PaymentThrottle]
 
     def post(self, request):
         serializer = ConfirmPaymentSerializer(data=request.data)
@@ -650,7 +786,7 @@ def stripe_webhook(request):
 
 class TransatelLogsView(APIView):
     """GET /api/recharge/transatel-logs/  — recent Transatel API call logs."""
-    permission_classes = [AllowAny]  # TODO: restrict to admin
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         limit = int(request.query_params.get("limit", 50))

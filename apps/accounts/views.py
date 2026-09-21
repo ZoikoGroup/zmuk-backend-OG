@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -7,10 +9,11 @@ from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.mail import EmailMultiAlternatives
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
-from django.contrib.sites.shortcuts import get_current_site
-from django.core.mail import send_mail
 from django.conf import settings
 from django.shortcuts import redirect
 
@@ -21,50 +24,88 @@ from .serializers import (
     ResetPasswordSerializer,
     UpdateUserSerializer,
     ChangePasswordSerializer,
-    
 )
 from .utils import get_safe_frontend_origin
 
+logger = logging.getLogger("apps.accounts")
+
+
+# ── Email helper ──────────────────────────────────────────────────────────────
+
+def _send_html_email(subject, template_name, context, recipient):
+    """Send a branded HTML email. Falls back to plain text automatically.
+    Returns True on success, False on failure (logged — never raises)."""
+    try:
+        html_body = render_to_string(template_name, context)
+        text_body = strip_tags(html_body)
+        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or "noreply@zoikomobile.co.uk"
+
+        msg = EmailMultiAlternatives(
+            subject=subject,
+            body=text_body,
+            from_email=from_email,
+            to=[recipient],
+        )
+        msg.attach_alternative(html_body, "text/html")
+        msg.send()
+        return True
+    except Exception:
+        logger.exception("Failed to send email '%s' to %s", subject, recipient)
+        return False
+
 
 # ---------------- REGISTER ----------------
+
 class RegisterAPI(APIView):
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # 🔒 User inactive until email verified
+        # Save user as inactive until email is verified.
+        # serializer.save() handles both new users and re-registration of
+        # inactive (unverified) accounts — in both cases it returns the user.
         user = serializer.save(is_active=False)
 
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
-
-        # ✅ Only trust X-Frontend-Origin if it's a known frontend; otherwise
-        # fall back to the canonical FRONTEND_URL from settings.
         frontend_origin = get_safe_frontend_origin(request)
 
-        # 🔗 Verification link includes frontend_origin as query param.
-        # Uses settings.BACKEND_URL (not request.build_absolute_uri) so the
-        # link is always a reachable address, not whatever host the request
-        # happened to arrive on.
         verification_link = (
             f"{settings.BACKEND_URL}/api/accounts/verify/{uid}/{token}/"
             f"?frontend={frontend_origin}"
         )
 
-        send_mail(
-            subject="Verify your email",
-            message=f"Click the link below to verify your email:\n\n{verification_link}",
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+        email_sent = _send_html_email(
+            subject="Verify your email – Zoiko Mobile",
+            template_name="emails/verify_email.html",
+            context={
+                "first_name": user.first_name or user.username,
+                "verification_link": verification_link,
+            },
+            recipient=user.email,
         )
 
-        return Response({
-            "message": "User registered successfully. Check your email for verification."
-        })
+        if email_sent:
+            return Response({
+                "message": (
+                    "Account created! Check your email for a verification link. "
+                    "If you registered before and missed it, we've resent it."
+                )
+            })
+        else:
+            # User row is saved — don't block them, just warn about email failure.
+            # Admins can manually activate or resend from Django admin.
+            return Response({
+                "message": (
+                    "Account created but we couldn't send the verification email right now. "
+                    "Please contact support or try registering again in a few minutes."
+                ),
+                "email_failed": True,
+            }, status=207)  # 207 Multi-Status: partial success
 
 
 # ---------------- VERIFY EMAIL ----------------
+
 class VerifyEmailAPI(APIView):
     def get(self, request, uidb64, token):
         try:
@@ -76,12 +117,9 @@ class VerifyEmailAPI(APIView):
         if not default_token_generator.check_token(user, token):
             return Response({"error": "Invalid or expired token"}, status=400)
 
-        # ✅ Activate user
         user.is_active = True
         user.save()
 
-        # ✅ Read frontend origin from query param passed in verification link,
-        # but only trust it if it's a known frontend (avoids an open redirect).
         requested = request.GET.get("frontend", "").rstrip("/")
         allowed = getattr(settings, "FRONTEND_ALLOWED_ORIGINS", [])
         if requested in allowed:
@@ -89,31 +127,11 @@ class VerifyEmailAPI(APIView):
         else:
             frontend_origin = getattr(settings, "FRONTEND_URL", "").rstrip("/")
 
-        # 🔗 Redirect to frontend login with verified flag
         return redirect(f"{frontend_origin}/login?verified=1")
 
 
 # ---------------- LOGIN ----------------
-# class LoginAPI(APIView):
-#     def post(self, request):
-#         serializer = LoginSerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
 
-#         user = serializer.validated_data
-#         token, _ = Token.objects.get_or_create(user=user)
-
-#         user_data = {
-#             field.name: getattr(user, field.name)
-#             for field in user._meta.fields
-#         }
-
-#         return Response({
-#             "message": "Login successful",
-#             "token": token.key,
-#             "user": user_data
-#         })
-
-# views.py
 class LoginAPI(APIView):
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -121,14 +139,6 @@ class LoginAPI(APIView):
 
         user = serializer.validated_data
         token, _ = Token.objects.get_or_create(user=user)
-
-        user_data = {
-            field.name: getattr(user, field.name)
-            for field in user._meta.fields
-        }
-
-        # Add VC ID
-        user_data['bq_enrollment_id'] = getattr(user.profile, 'bq_enrollment_id', None)
 
         return Response({
             "message": "Login successful",
@@ -145,6 +155,7 @@ class LoginAPI(APIView):
 
 
 # ---------------- LOGOUT ----------------
+
 class LogoutAPI(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -154,6 +165,7 @@ class LogoutAPI(APIView):
 
 
 # ---------------- DASHBOARD ----------------
+
 class DashboardAPI(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -166,6 +178,7 @@ class DashboardAPI(APIView):
 
 
 # ---------------- FORGOT PASSWORD ----------------
+
 class ForgotPasswordAPI(APIView):
     def post(self, request):
         serializer = ForgotPasswordSerializer(data=request.data)
@@ -173,34 +186,39 @@ class ForgotPasswordAPI(APIView):
 
         email = serializer.validated_data["email"].strip().lower()
 
+        # Always return the same response regardless of whether the email exists
+        # — prevents user enumeration (someone probing which emails are registered).
         try:
             user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             return Response({
-                "message": "If the email exists, a reset link was sent."
+                "message": "If that email is registered, a reset link has been sent."
             })
 
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
-
         frontend_origin = get_safe_frontend_origin(request)
-
         reset_link = f"{frontend_origin}/reset-password/{uid}/{token}"
 
-        send_mail(
-            subject="Reset your password",
-            message=f"Click the link below to reset your password:\n\n{reset_link}",
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+        _send_html_email(
+            subject="Reset your Zoiko Mobile password",
+            template_name="emails/reset_password.html",
+            context={
+                "first_name": user.first_name or user.username,
+                "reset_link": reset_link,
+            },
+            recipient=user.email,
         )
 
+        # Don't tell the user whether email sending succeeded — prevents
+        # confirming that the email is registered.
         return Response({
-            "message": "Password reset link sent"
+            "message": "If that email is registered, a reset link has been sent."
         })
 
 
 # ---------------- RESET PASSWORD ----------------
+
 class ResetPasswordAPI(APIView):
     def post(self, request, uidb64, token):
         serializer = ResetPasswordSerializer(data=request.data)
@@ -212,42 +230,20 @@ class ResetPasswordAPI(APIView):
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
             return Response({"error": "Invalid link"}, status=400)
 
-        if default_token_generator.check_token(user, token):
-            # Explicit check (with user=) so the similarity/attribute
-            # validators can compare against this user, not just the
-            # generic rules the serializer field validator already runs.
-            try:
-                validate_password(serializer.validated_data["password"], user=user)
-            except ValidationError as e:
-                return Response({"error": list(e.messages)}, status=400)
+        if not default_token_generator.check_token(user, token):
+            return Response({"error": "Invalid or expired token"}, status=400)
 
-            user.set_password(serializer.validated_data["password"])
-            user.save()
-            return Response({"message": "Password reset successful"})
+        try:
+            validate_password(serializer.validated_data["password"], user=user)
+        except ValidationError as e:
+            return Response({"error": list(e.messages)}, status=400)
 
-        return Response({"error": "Invalid or expired token"}, status=400)
+        user.set_password(serializer.validated_data["password"])
+        user.save()
+        return Response({"message": "Password reset successful"})
 
 
 # ---------------- UPDATE PROFILE ----------------
-# class UpdateUserAPI(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def put(self, request):
-#         serializer = UpdateUserSerializer(
-#             request.user,
-#             data=request.data,
-#             partial=True,
-#             context={"request": request}
-#         )
-
-#         serializer.is_valid(raise_exception=True)
-#         serializer.save()
-
-#         return Response({
-#             "message": "Profile updated successfully",
-#             "user": serializer.data
-#         })
-
 
 class UpdateUserAPI(APIView):
     permission_classes = [IsAuthenticated]
@@ -259,13 +255,11 @@ class UpdateUserAPI(APIView):
             partial=True,
             context={"request": request}
         )
-
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        # Include bq_enrollment_id in response
         response_data = serializer.data
-        response_data['bq_enrollment_id'] = getattr(request.user.profile, 'bq_enrollment_id', None)
+        response_data["bq_enrollment_id"] = getattr(request.user.profile, "bq_enrollment_id", None)
 
         return Response({
             "message": "Profile updated successfully",
@@ -274,6 +268,7 @@ class UpdateUserAPI(APIView):
 
 
 # ---------------- SOCIAL LOGIN / REGISTER ----------------
+
 class SocialUserAPI(APIView):
     def post(self, request):
         email = request.data.get("email")
@@ -283,38 +278,36 @@ class SocialUserAPI(APIView):
         if not email:
             return Response({"error": "Email is required"}, status=400)
 
-        # ✅ Check if user exists
         user = User.objects.filter(email=email).first()
 
         if not user:
-            # Create user without password
             user = User.objects.create_user(
                 username=email,
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
-                is_active=True  # Social users auto verified
+                is_active=True,
             )
             user.set_unusable_password()
             user.save()
 
-        # ✅ Create or get token
         token, _ = Token.objects.get_or_create(user=user)
-
-        user_data = {
-            field.name: getattr(user, field.name)
-            for field in user._meta.fields
-        }
-
-        # Add VC ID (same as login)
-        user_data['bq_enrollment_id'] = getattr(user.profile, 'bq_enrollment_id', None)
 
         return Response({
             "message": "Social login successful",
             "token": token.key,
-            "user": user_data
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "bq_enrollment_id": getattr(user.profile, "bq_enrollment_id", None),
+            }
         })
 
+
+# ---------------- CHANGE PASSWORD ----------------
 
 class ChangePasswordAPI(APIView):
     permission_classes = [IsAuthenticated]
@@ -325,9 +318,6 @@ class ChangePasswordAPI(APIView):
 
         user = request.user
 
-        # Explicit check (with user=) so the similarity/attribute
-        # validators can compare against this user, not just the
-        # generic rules the serializer field validator already runs.
         try:
             validate_password(serializer.validated_data["password"], user=user)
         except ValidationError as e:
@@ -336,7 +326,7 @@ class ChangePasswordAPI(APIView):
         user.set_password(serializer.validated_data["password"])
         user.save()
 
-        # Rotate the auth token so the new session stays valid after the change.
+        # Rotate auth token so old sessions are invalidated.
         Token.objects.filter(user=user).delete()
         token = Token.objects.create(user=user)
 
