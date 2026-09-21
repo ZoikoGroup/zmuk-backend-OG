@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.contrib.auth import authenticate
 
 
@@ -38,6 +39,10 @@ class RegisterSerializer(serializers.Serializer):
         # re-send the verification email instead of blocking them.
         inactive = User.objects.filter(email__iexact=attrs["email"], is_active=False).first()
         if inactive:
+            try:
+                validate_password(attrs["password"], user=inactive)
+            except ValidationError as e:
+                raise serializers.ValidationError({"password": list(e.messages)})
             inactive.set_password(attrs["password"])
             inactive.first_name = attrs.get("first_name", "")
             inactive.last_name  = attrs.get("last_name", "")
