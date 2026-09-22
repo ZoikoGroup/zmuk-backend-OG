@@ -20,7 +20,7 @@ urlpatterns = [
     path('api/accounts/', include('apps.accounts.urls')),
     path("api/recharge/", include("apps.recharge.urls")),
     path("api/v1/transatel/", include("apps.sims.transatel_urls")),
-    # path("api/students/", include("apps.student_discount.urls")),
+    path("api/student-discount/", include("apps.student_discount.urls")),
     # path("api/responder/", include("apps.first_responder.urls")),
     # path("api/military-discount/", include('apps.military_discount.urls')),
     # path("api/marine-discount/",include("apps.marine_discount.urls")),
