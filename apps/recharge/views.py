@@ -309,7 +309,7 @@ class RechargeModulesView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        mods = RechargeModule.objects.all()
+        mods = RechargeModule.objects.filter(enabled=True)
         return Response(RechargeModuleSerializer(mods, many=True).data)
 
 
@@ -369,6 +369,42 @@ class RechargeOrderDetailView(APIView):
         data["reactivation_transaction_id"] = attempt.provider_transaction_id if attempt else None
 
         return Response({"success": True, "order": data})
+
+
+# ── Public Order Status (for success page — no admin required) ───────────
+
+class RechargeOrderStatusView(APIView):
+    """GET /api/recharge/order-status/<order_ref>/
+
+    Public endpoint returning limited order info for the success/confirmation
+    page. Only exposes what the customer needs to see — no internal IDs or
+    admin data.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, order_ref):
+        order = RechargeOrder.objects.filter(order_ref=order_ref).first()
+        if not order:
+            return Response(
+                {"success": False, "message": "Order not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        attempt = order.reactivation_attempts.order_by("-updated_at").first()
+
+        return Response({
+            "success": True,
+            "order": {
+                "order_ref": order.order_ref,
+                "msisdn": order.msisdn,
+                "amount": order.amount_display,
+                "status": order.status,
+                "status_label": order.get_status_display(),
+                "product_name": order.product.name if order.product else None,
+                "reactivation_status": attempt.status if attempt else None,
+                "created_at": order.created_at.isoformat(),
+            },
+        })
 
 
 # ── Create Order ─────────────────────────────────────────────────────────

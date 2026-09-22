@@ -7,6 +7,7 @@ from .views import (
     RechargeStatsView,
     RechargeOrdersView,
     RechargeOrderDetailView,
+    RechargeOrderStatusView,
     CreateRechargeView,
     CreatePaymentIntentView,
     ConfirmPaymentView,
@@ -34,6 +35,7 @@ urlpatterns = [
     # Order lookup
     path("orders/", RechargeOrdersView.as_view(), name="recharge_orders"),
     path("orders/<str:order_ref>/", RechargeOrderDetailView.as_view(), name="recharge_order_detail"),
+    path("order-status/<str:order_ref>/", RechargeOrderStatusView.as_view(), name="recharge_order_status"),
 
     # Stripe webhook (payment confirmation → reactivation)
     path("webhook/", stripe_webhook, name="recharge_webhook"),
