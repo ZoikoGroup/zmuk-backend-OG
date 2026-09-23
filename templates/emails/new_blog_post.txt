@@ -1,0 +1,16 @@
+{{ site_name }} — new article
+
+{{ post.title }}
+{{ post.created_at|date:"j F Y" }}
+
+{{ post.excerpt }}
+
+Read the full article:
+{{ post_url }}
+
+---
+
+You are receiving this because you subscribed to updates from {{ site_name }}.
+
+Unsubscribe: {{ unsubscribe_url }}
+All articles: {{ frontend_url }}/blogs

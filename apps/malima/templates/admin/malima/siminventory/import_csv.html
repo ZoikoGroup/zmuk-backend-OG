@@ -1,0 +1,81 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:malima_siminventory_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; {% trans 'Import CSV' %}
+  </div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+
+  <p style="max-width: 720px;">
+    Upload a Malima/Orange daily CSV export (<code>CDFLTDLY_*.csv</code>) —
+    semicolon-delimited, UTF-8 with BOM, 62 columns.
+  </p>
+  <p style="max-width: 720px;">
+    Only <code>simIccid</code> and <code>imsi</code> are required. Other
+    columns (subscriber, device, network, tariff, etc.) are stored when
+    present. Re-running with the same file is safe — existing
+    <code>simIccid</code>s are skipped unless <em>Update existing rows</em>
+    is checked.
+  </p>
+  <p style="max-width: 720px;">
+    The <code>inventory</code> column (INSTOCK / PENDING / OUTOFSTOCK /
+    RETIRED / TEST) is <strong>not</strong> overwritten by re-imports —
+    it's Zoiko-side bookkeeping, separate from the carrier's
+    <code>simStatus</code>.
+  </p>
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      {% for field in form %}
+        <div class="form-row">
+          <div>
+            <label for="{{ field.id_for_label }}"
+                   {% if field.field.required %}class="required"{% endif %}>
+              {{ field.label }}:
+            </label>
+            {{ field }}
+            {% if field.help_text %}
+              <div class="help">{{ field.help_text|safe }}</div>
+            {% endif %}
+            {{ field.errors }}
+          </div>
+        </div>
+      {% endfor %}
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" value="{% trans 'Import' %}" class="default" />
+      <a href="{% url 'admin:malima_siminventory_changelist' %}"
+         class="button cancel-link">{% trans 'Cancel' %}</a>
+    </div>
+  </form>
+
+  {% if result %}
+    <h2>{% trans 'Last run' %}</h2>
+    <table>
+      <tr><th>Delimiter</th>          <td><code>{{ result.delimiter }}</code></td></tr>
+      <tr><th>Columns mapped</th>     <td>{{ result.columns_detected|length }}</td></tr>
+      <tr><th>Would create</th>       <td>{{ result.created }}</td></tr>
+      <tr><th>Would update</th>       <td>{{ result.updated }}</td></tr>
+      <tr><th>Skipped (existing)</th> <td>{{ result.skipped }}</td></tr>
+      <tr><th>Rejected (invalid)</th> <td>{{ result.invalid }}</td></tr>
+    </table>
+    {% if result.warnings %}
+      <h3>{% trans 'Warnings' %}</h3>
+      <ul>
+        {% for w in result.warnings|slice:":20" %}
+          <li>{{ w }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endif %}
+
+</div>
+{% endblock %}

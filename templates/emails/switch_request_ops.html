@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>New Switch Request – Zoiko Mobile Ops</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:#0e1929;padding:24px 40px;text-align:center;">
+              <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">🔔 New Switch Request</h1>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:32px 40px 24px;">
+              <p style="margin:0 0 20px;color:#444;font-size:15px;line-height:1.6;">
+                A new number port request has been submitted. Details below:
+              </p>
+
+              <!-- Customer details -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px;">
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;width:40%;border-bottom:1px solid #e9ecef;">Name</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ first_name }} {{ last_name }}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Email</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;"><a href="mailto:{{ email }}" style="color:#0e8f74;">{{ email }}</a></td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Mobile</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ mobile }}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Postcode</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ postcode }}</td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Current Provider</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ current_provider|default:"Not provided" }}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Current Plan Cost</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{% if current_plan_cost %}£{{ current_plan_cost }}/month{% else %}Not provided{% endif %}</td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Current Data</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{% if current_data_allowance %}{{ current_data_allowance }}GB{% else %}Not provided{% endif %}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Selected Plan</td>
+                  <td style="padding:10px 14px;font-weight:700;color:#e6007e;border-bottom:1px solid #e9ecef;">{{ selected_plan }}</td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;">Submitted</td>
+                  <td style="padding:10px 14px;color:#444;">{{ created_at }}</td>
+                </tr>
+              </table>
+
+              <p style="margin:24px 0 0;color:#888;font-size:13px;">
+                Log into the <a href="https://api.zoikomobile.co.uk/admin/" style="color:#0e8f74;">Django Admin</a> to manage this request.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f4f4f5;padding:20px 40px;text-align:center;">
+              <p style="margin:0;color:#aaa;font-size:12px;">Zoiko Mobile · Internal notification</p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
