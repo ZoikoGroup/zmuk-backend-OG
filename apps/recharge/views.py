@@ -1,9 +1,12 @@
 import logging
 
 from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
 from django.db.models import Sum
 from django.http import HttpResponse, JsonResponse
+from django.template.loader import render_to_string
 from django.utils import timezone
+from django.utils.html import strip_tags
 from django.views.decorators.csrf import csrf_exempt
 
 from rest_framework.views import APIView
@@ -16,6 +19,36 @@ class TransatelLookupThrottle(AnonRateThrottle):
     """Tight rate limit for endpoints that trigger live Transatel API calls.
     Each validate-phone/ call makes 2 Transatel requests — protect the quota."""
     rate = '30/minute'
+
+
+def _send_recharge_receipt(order):
+    """Send a payment confirmation email after a successful recharge.
+    Safe to call multiple times — will not raise on failure."""
+    email = getattr(order, "customer_email", "") or ""
+    if not email:
+        return
+    try:
+        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or "noreply@zoikomobile.co.uk"
+        ctx = {
+            "order_ref": order.order_ref,
+            "msisdn": order.msisdn or "N/A",
+            "product_name": order.product.name if order.product else "Recharge",
+            "amount": order.amount_display,
+            "paid_at": order.paid_at,
+        }
+        html = render_to_string("emails/recharge_receipt.html", ctx)
+        text = strip_tags(html)
+        msg = EmailMultiAlternatives(
+            subject=f"Recharge Confirmed — {order.order_ref}",
+            body=text,
+            from_email=from_email,
+            to=[email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send()
+        logger.info("Recharge receipt sent to %s for %s", email, order.order_ref)
+    except Exception:
+        logger.exception("Failed to send recharge receipt to %s for %s", email, order.order_ref)
 
 
 class PaymentThrottle(AnonRateThrottle):
@@ -757,6 +790,9 @@ class ConfirmBySessionView(APIView):
         order.paid_at = timezone.now()
         order.save(update_fields=["stripe_payment_intent_id", "status", "paid_at", "updated_at"])
 
+        # Send receipt email to customer
+        _send_recharge_receipt(order)
+
         # Trigger reactivation
         attempt = None
         if order.sim_serial:
@@ -824,6 +860,9 @@ def stripe_webhook(request):
             order.save(update_fields=["status", "stripe_payment_intent_id", "paid_at", "updated_at"])
 
             logger.info("Payment confirmed for %s — triggering reactivation", order.order_ref)
+
+            # Send receipt email to customer
+            _send_recharge_receipt(order)
 
             # ── TRIGGER TRANSATEL REACTIVATION ──
             if order.sim_serial:

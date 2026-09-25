@@ -270,13 +270,59 @@ class UpdateUserAPI(APIView):
 # ---------------- SOCIAL LOGIN / REGISTER ----------------
 
 class SocialUserAPI(APIView):
+    """POST /api/accounts/social-user/
+
+    Google login: verifies the Google ID token server-side using the
+    GOOGLE_CLIENT_ID env var, then creates or retrieves the user.
+    Works with both local and production Google client IDs.
+
+    Request: { id_token, email, first_name?, last_name? }
+    """
+
     def post(self, request):
-        email = request.data.get("email")
+        id_token_str = request.data.get("id_token", "").strip()
+        email = request.data.get("email", "").strip()
         first_name = request.data.get("first_name", "")
         last_name = request.data.get("last_name", "")
 
         if not email:
             return Response({"error": "Email is required"}, status=400)
+
+        # ── Verify Google ID token if provided ─────────────────────────────
+        google_client_id = getattr(settings, "GOOGLE_CLIENT_ID", "") or ""
+        if id_token_str and google_client_id:
+            try:
+                import requests as http_requests
+                # Use Google's tokeninfo endpoint — no extra library needed
+                resp = http_requests.get(
+                    "https://oauth2.googleapis.com/tokeninfo",
+                    params={"id_token": id_token_str},
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    return Response({"error": "Invalid Google token."}, status=401)
+
+                token_data = resp.json()
+                token_aud = token_data.get("aud", "")
+                token_email = token_data.get("email", "")
+
+                if token_aud != google_client_id:
+                    logger.warning(
+                        "Google token audience mismatch: got %s, expected %s",
+                        token_aud, google_client_id,
+                    )
+                    return Response({"error": "Token audience mismatch."}, status=401)
+
+                if token_email.lower() != email.lower():
+                    return Response({"error": "Token email does not match."}, status=401)
+
+                # Use name from Google token if not provided
+                first_name = first_name or token_data.get("given_name", "")
+                last_name = last_name or token_data.get("family_name", "")
+
+            except Exception:
+                logger.exception("Google token verification failed for %s", email)
+                return Response({"error": "Could not verify Google token."}, status=401)
 
         user = User.objects.filter(email=email).first()
 
@@ -290,6 +336,17 @@ class SocialUserAPI(APIView):
             )
             user.set_unusable_password()
             user.save()
+        else:
+            # Update name if it was empty before
+            changed = False
+            if first_name and not user.first_name:
+                user.first_name = first_name
+                changed = True
+            if last_name and not user.last_name:
+                user.last_name = last_name
+                changed = True
+            if changed:
+                user.save(update_fields=["first_name", "last_name"])
 
         token, _ = Token.objects.get_or_create(user=user)
 
