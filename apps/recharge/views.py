@@ -1,9 +1,12 @@
 import logging
 
 from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
 from django.db.models import Sum
 from django.http import HttpResponse, JsonResponse
+from django.template.loader import render_to_string
 from django.utils import timezone
+from django.utils.html import strip_tags
 from django.views.decorators.csrf import csrf_exempt
 
 from rest_framework.views import APIView
@@ -16,6 +19,36 @@ class TransatelLookupThrottle(AnonRateThrottle):
     """Tight rate limit for endpoints that trigger live Transatel API calls.
     Each validate-phone/ call makes 2 Transatel requests — protect the quota."""
     rate = '30/minute'
+
+
+def _send_recharge_receipt(order):
+    """Send a payment confirmation email after a successful recharge.
+    Safe to call multiple times — will not raise on failure."""
+    email = getattr(order, "customer_email", "") or ""
+    if not email:
+        return
+    try:
+        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or "noreply@zoikomobile.co.uk"
+        ctx = {
+            "order_ref": order.order_ref,
+            "msisdn": order.msisdn or "N/A",
+            "product_name": order.product.name if order.product else "Recharge",
+            "amount": order.amount_display,
+            "paid_at": order.paid_at,
+        }
+        html = render_to_string("emails/recharge_receipt.html", ctx)
+        text = strip_tags(html)
+        msg = EmailMultiAlternatives(
+            subject=f"Recharge Confirmed — {order.order_ref}",
+            body=text,
+            from_email=from_email,
+            to=[email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send()
+        logger.info("Recharge receipt sent to %s for %s", email, order.order_ref)
+    except Exception:
+        logger.exception("Failed to send recharge receipt to %s for %s", email, order.order_ref)
 
 
 class PaymentThrottle(AnonRateThrottle):
@@ -403,6 +436,8 @@ class RechargeOrderStatusView(APIView):
                 "product_name": order.product.name if order.product else None,
                 "reactivation_status": attempt.status if attempt else None,
                 "created_at": order.created_at.isoformat(),
+                "stripe_payment_intent_id": order.stripe_payment_intent_id or "",
+                "stripe_session_id": order.stripe_session_id or "",
             },
         })
 
@@ -701,6 +736,89 @@ class ConfirmPaymentView(APIView):
         }
 
 
+# ── Confirm by Stripe Session ID (no CLI / ngrok needed) ─────────────────
+
+class ConfirmBySessionView(APIView):
+    """POST /api/recharge/confirm-session/
+
+    Alternative confirm that retrieves the PaymentIntent from the
+    Stripe Checkout Session stored on the order. Called by the success
+    page when no payment_intent param is in the URL.
+
+    Request:  { "order_ref": "RC-XXXXXXXXXX" }
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [PaymentThrottle]
+
+    def post(self, request):
+        order_ref = request.data.get("order_ref", "").strip()
+        if not order_ref:
+            return Response({"success": False, "message": "order_ref is required."}, status=400)
+
+        order = RechargeOrder.objects.filter(order_ref=order_ref).first()
+        if not order:
+            return Response({"success": False, "message": "Order not found."}, status=404)
+
+        if order.status == RechargeOrder.STATUS_COMPLETED:
+            attempt = order.reactivation_attempts.order_by("-updated_at").first()
+            return Response(self._success_payload(order, attempt))
+
+        if not order.stripe_session_id:
+            return Response({"success": False, "message": "No session found for this order."}, status=400)
+
+        try:
+            services._init()
+            import stripe as _stripe
+            session = _stripe.checkout.Session.retrieve(order.stripe_session_id)
+        except services.StripeNotConfigured as exc:
+            return Response({"detail": str(exc)}, status=503)
+        except Exception as exc:
+            logger.exception("Could not retrieve Stripe session for %s", order_ref)
+            return Response({"success": False, "message": f"Could not verify payment: {exc}"}, status=502)
+
+        if session.payment_status != "paid":
+            return Response({
+                "success": False,
+                "message": f"Payment not completed (status: {session.payment_status}).",
+                "payment_status": session.payment_status,
+            }, status=402)
+
+        # Payment confirmed — store PI and mark processing
+        payment_intent_id = session.payment_intent or ""
+        order.stripe_payment_intent_id = payment_intent_id
+        order.status = RechargeOrder.STATUS_PROCESSING
+        order.paid_at = timezone.now()
+        order.save(update_fields=["stripe_payment_intent_id", "status", "paid_at", "updated_at"])
+
+        # Send receipt email to customer
+        _send_recharge_receipt(order)
+
+        # Trigger reactivation
+        attempt = None
+        if order.sim_serial:
+            try:
+                attempt = reactivation_service.reactivate_for_order(order)
+            except Exception:
+                logger.exception("Reactivation error for %s", order_ref)
+
+        return Response(self._success_payload(order, attempt))
+
+    def _success_payload(self, order, attempt=None):
+        if attempt is None:
+            attempt = order.reactivation_attempts.order_by("-updated_at").first()
+        return {
+            "success": True,
+            "order": {
+                "order_ref": order.order_ref,
+                "msisdn": order.msisdn,
+                "amount": order.amount_display,
+                "status": order.status,
+                "product_name": order.product.name if order.product else None,
+                "reactivation_status": attempt.status if attempt else None,
+            }
+        }
+
+
 # ── Stripe Webhook ───────────────────────────────────────────────────────
 
 @csrf_exempt  # nosemgrep: no-csrf-exempt -- Stripe webhook, verified via signature in construct_webhook_event(), not CSRF token
@@ -742,6 +860,9 @@ def stripe_webhook(request):
             order.save(update_fields=["status", "stripe_payment_intent_id", "paid_at", "updated_at"])
 
             logger.info("Payment confirmed for %s — triggering reactivation", order.order_ref)
+
+            # Send receipt email to customer
+            _send_recharge_receipt(order)
 
             # ── TRIGGER TRANSATEL REACTIVATION ──
             if order.sim_serial:

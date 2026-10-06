@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import BqOrder
+from .models import BqOrder, CheckoutPayment
 from django.utils.html import format_html
 import json
 
@@ -49,3 +49,56 @@ class BqOrderAdmin(admin.ModelAdmin):
         )
 
     formatted_json.short_description = "Bq Order JSON Data"
+
+
+@admin.register(CheckoutPayment)
+class CheckoutPaymentAdmin(admin.ModelAdmin):
+    list_display = (
+        "order_ref", "email", "amount_display", "status",
+        "processed", "created_at",
+    )
+    list_filter = ("status", "processed", "created_at")
+    search_fields = ("order_ref", "email", "stripe_payment_intent_id")
+    ordering = ("-created_at",)
+    readonly_fields = (
+        "order_ref", "stripe_payment_intent_id", "created_at",
+        "updated_at", "formatted_payload",
+    )
+
+    fieldsets = (
+        (None, {
+            "fields": (
+                "order_ref", "email", "amount_pence", "currency",
+                "status", "processed", "stripe_payment_intent_id",
+                "created_at", "updated_at",
+            ),
+        }),
+        ("Full Cart / Billing Payload", {
+            "classes": ("collapse",),
+            "fields": ("formatted_payload",),
+        }),
+    )
+
+    def amount_display(self, obj):
+        return f"£{obj.amount_pence / 100:.2f}"
+    amount_display.short_description = "Amount"
+
+    def formatted_payload(self, obj):
+        pretty = json.dumps(obj.payload, indent=4, sort_keys=True)
+        return format_html(
+            """
+            <div style="
+                background:#0f172a;
+                color:#e5e7eb;
+                padding:15px;
+                border-radius:10px;
+                font-family: monospace;
+                font-size:13px;
+                max-height:600px;
+                overflow:auto;
+                white-space:pre;
+            ">{}</div>
+            """,
+            pretty
+        )
+    formatted_payload.short_description = "Cart/Billing JSON"

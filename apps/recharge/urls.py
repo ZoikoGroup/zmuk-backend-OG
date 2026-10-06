@@ -11,6 +11,7 @@ from .views import (
     CreateRechargeView,
     CreatePaymentIntentView,
     ConfirmPaymentView,
+    ConfirmBySessionView,
     TransatelLogsView,
     stripe_webhook,
 )
@@ -31,6 +32,7 @@ urlpatterns = [
     path("create/", CreateRechargeView.as_view(), name="recharge_create"),
     path("create-intent/", CreatePaymentIntentView.as_view(), name="recharge_create_intent"),
     path("confirm/", ConfirmPaymentView.as_view(), name="recharge_confirm"),
+    path("confirm-session/", ConfirmBySessionView.as_view(), name="recharge_confirm_session"),
 
     # Order lookup
     path("orders/", RechargeOrdersView.as_view(), name="recharge_orders"),
