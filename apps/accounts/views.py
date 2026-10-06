@@ -1,5 +1,6 @@
 import logging
 
+import requests as http_requests
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -28,6 +29,11 @@ from .serializers import (
 from .utils import get_safe_frontend_origin
 
 logger = logging.getLogger("apps.accounts")
+
+GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+
+# Fields never returned by the dashboard endpoint.
+_DASHBOARD_EXCLUDED_FIELDS = {"password"}
 
 
 # ── Email helper ──────────────────────────────────────────────────────────────
@@ -171,9 +177,11 @@ class DashboardAPI(APIView):
 
     def get(self, request):
         user = request.user
+        # FIX: previously returned every model field, including the password hash.
         return Response({
             field.name: getattr(user, field.name)
             for field in user._meta.fields
+            if field.name not in _DASHBOARD_EXCLUDED_FIELDS
         })
 
 
@@ -270,13 +278,72 @@ class UpdateUserAPI(APIView):
 # ---------------- SOCIAL LOGIN / REGISTER ----------------
 
 class SocialUserAPI(APIView):
+    """POST /api/accounts/social-user/
+
+    Google login: verifies the Google ID token server-side using the
+    GOOGLE_CLIENT_ID env var, then creates or retrieves the user.
+    Works with both local and production Google client IDs.
+
+    Request: { id_token, email, first_name?, last_name? }
+
+    Verification is MANDATORY. Previously, if id_token was omitted or
+    GOOGLE_CLIENT_ID was unset, verification was skipped and an auth token
+    was issued for any email supplied (account takeover).
+    """
+
     def post(self, request):
-        email = request.data.get("email")
+        id_token_str = (request.data.get("id_token") or "").strip()
+        email = (request.data.get("email") or "").strip()
         first_name = request.data.get("first_name", "")
         last_name = request.data.get("last_name", "")
 
         if not email:
             return Response({"error": "Email is required"}, status=400)
+
+        google_client_id = getattr(settings, "GOOGLE_CLIENT_ID", "") or ""
+        if not google_client_id:
+            logger.error("Google sign-in unavailable: GOOGLE_CLIENT_ID is not configured.")
+            return Response({"error": "Google sign-in is not available."}, status=503)
+
+        if not id_token_str:
+            return Response({"error": "id_token is required."}, status=400)
+
+        # ── Verify Google ID token (always) ────────────────────────────────
+        try:
+            resp = http_requests.get(
+                GOOGLE_TOKENINFO_URL,
+                params={"id_token": id_token_str},
+                timeout=10,
+            )
+        except http_requests.RequestException as exc:
+            logger.warning("Google sign-in verification request failed: %s", type(exc).__name__)
+            return Response({"error": "Could not verify Google token."}, status=503)
+
+        if resp.status_code != 200:
+            return Response({"error": "Invalid Google token."}, status=401)
+
+        try:
+            token_data = resp.json()
+        except ValueError:
+            return Response({"error": "Invalid Google token."}, status=401)
+
+        token_aud = token_data.get("aud", "")
+        token_email = token_data.get("email", "") or ""
+        email_verified = str(token_data.get("email_verified", "")).lower() == "true"
+
+        if token_aud != google_client_id:
+            logger.warning("Google sign-in rejected: audience mismatch (got=%s)", token_aud)
+            return Response({"error": "Token audience mismatch."}, status=401)
+
+        if not email_verified:
+            return Response({"error": "Google account email is not verified."}, status=401)
+
+        if token_email.lower() != email.lower():
+            return Response({"error": "Token email does not match."}, status=401)
+
+        # Use name from Google token if not provided
+        first_name = first_name or token_data.get("given_name", "")
+        last_name = last_name or token_data.get("family_name", "")
 
         user = User.objects.filter(email=email).first()
 
@@ -290,6 +357,17 @@ class SocialUserAPI(APIView):
             )
             user.set_unusable_password()
             user.save()
+        else:
+            # Update name if it was empty before
+            changed = False
+            if first_name and not user.first_name:
+                user.first_name = first_name
+                changed = True
+            if last_name and not user.last_name:
+                user.last_name = last_name
+                changed = True
+            if changed:
+                user.save(update_fields=["first_name", "last_name"])
 
         token, _ = Token.objects.get_or_create(user=user)
 

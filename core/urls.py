@@ -38,6 +38,7 @@ path("api/", include("apps.contact.urls")),
     path('search/', include('apps.search.urls')),
     path('api/travel-ecosystem-partner/', include('apps.travel_ecosystem_partner.urls')),
     path("api/v1/sim_orders/", include("apps.sim_orders.urls")),
+    path("api/v1/", include("apps.orders.urls")),
     path("api/v1/sims/", include("apps.sims.urls")),  # sim-orders/ (reserve+activate via Transatel), sims/availability/, sims/reserve/, sims/release/
     path("api/", include("apps.enterprise.urls")),
     path('api/', include('apps.integrations.urls')),

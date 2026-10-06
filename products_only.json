@@ -1,0 +1,262 @@
+[
+{
+  "model": "recharge.transatellog",
+  "pk": 1,
+  "fields": {
+    "order": null,
+    "action": "validate_phone_live",
+    "sim_serial_masked": "89**************264",
+    "msisdn_masked": "07******749",
+    "request_url": "{base}/connectivity-management/subscribers/api/subscribers/msisdn/447529902749",
+    "request_method": "GET",
+    "request_body": null,
+    "response_status": 200,
+    "response_body": {
+      "group": "COMMERCIAL_ZOIKO",
+      "msisdn": "447529902749",
+      "status": "Suspended",
+      "mvnoRef": "MVNA_UK_EEL_ZOIKOTELECOM",
+      "options": [
+        {
+          "name": "TSL_VMS",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "BT_CW",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "BT_CH",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "TSL_UK_DATA_TIERED",
+          "value": "on",
+          "activationDate": "2025-09-25"
+        },
+        {
+          "name": "BT_IMS_HIYA",
+          "value": "on",
+          "activationDate": "2024-11-25"
+        },
+        {
+          "name": "TSL_ROAMING_RLAH",
+          "value": "on",
+          "activationDate": "2026-02-05"
+        },
+        {
+          "name": "BT_AC_ALLOW_ADULT_CONTENT",
+          "value": "on",
+          "activationDate": "2024-01-16"
+        },
+        {
+          "name": "TSL_UK_VOICE_SMS_PPU",
+          "value": "on",
+          "activationDate": "2024-10-30"
+        },
+        {
+          "name": "VMS_MEDIABOX_COMMON_UK_SMS_ONLY",
+          "value": "on",
+          "activationDate": "2026-04-02"
+        },
+        {
+          "name": "BT_5G",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "BT_CLI",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "TSL_NO_BAR_SCP_SMS",
+          "value": "on",
+          "activationDate": "2024-01-16"
+        },
+        {
+          "name": "TSL_INTERNATIONAL_EU_ONLY",
+          "value": "on",
+          "activationDate": "2026-02-05"
+        },
+        {
+          "name": "BT_BAR_MMS",
+          "value": "on",
+          "activationDate": "2025-03-25"
+        }
+      ],
+      "ratePlan": "MVNA Wholesale PAYM 7",
+      "simSerial": "8944122666625650264",
+      "primaryImsi": "234336539653937",
+      "activationDate": "2023-12-11T17:34:37Z",
+      "groupReference": "d970de0c-b2ce-43a2-9747-610b817f26c2",
+      "serviceProfile": "Zoiko 30GB",
+      "serviceProfileDeviation": true
+    },
+    "error_message": "",
+    "success": true,
+    "duration_ms": 3432,
+    "created_at": "2026-09-24T10:36:10.698Z"
+  }
+},
+{
+  "model": "recharge.transatellog",
+  "pk": 2,
+  "fields": {
+    "order": null,
+    "action": "get_subscriber_detail",
+    "sim_serial_masked": "89**************264",
+    "msisdn_masked": "07******749",
+    "request_url": "{base}/connectivity-management/subscribers/api/subscribers/sim-serial/8944122666625650264",
+    "request_method": "GET",
+    "request_body": null,
+    "response_status": 200,
+    "response_body": {
+      "group": "COMMERCIAL_ZOIKO",
+      "msisdn": "447529902749",
+      "status": "Suspended",
+      "mvnoRef": "MVNA_UK_EEL_ZOIKOTELECOM",
+      "options": [
+        {
+          "name": "TSL_VMS",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "BT_CW",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "BT_CH",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "VMS_MEDIABOX_COMMON_UK_SMS_ONLY",
+          "value": "on",
+          "activationDate": "2026-04-02"
+        },
+        {
+          "name": "TSL_UK_VOICE_SMS_PPU",
+          "value": "on",
+          "activationDate": "2024-10-30"
+        },
+        {
+          "name": "BT_5G",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "TSL_ROAMING_RLAH",
+          "value": "on",
+          "activationDate": "2026-02-05"
+        },
+        {
+          "name": "TSL_INTERNATIONAL_EU_ONLY",
+          "value": "on",
+          "activationDate": "2026-02-05"
+        },
+        {
+          "name": "BT_CLI",
+          "value": "on",
+          "activationDate": "2023-12-11"
+        },
+        {
+          "name": "TSL_NO_BAR_SCP_SMS",
+          "value": "on",
+          "activationDate": "2024-01-16"
+        },
+        {
+          "name": "BT_AC_ALLOW_ADULT_CONTENT",
+          "value": "on",
+          "activationDate": "2024-01-16"
+        },
+        {
+          "name": "TSL_UK_DATA_TIERED",
+          "value": "on",
+          "activationDate": "2025-09-25"
+        },
+        {
+          "name": "BT_IMS_HIYA",
+          "value": "on",
+          "activationDate": "2024-11-25"
+        },
+        {
+          "name": "BT_BAR_MMS",
+          "value": "on",
+          "activationDate": "2025-03-25"
+        }
+      ],
+      "ratePlan": "MVNA Wholesale PAYM 7",
+      "simSerial": "8944122666625650264",
+      "primaryImsi": "234336539653937",
+      "activationDate": "2023-12-11T17:34:37Z",
+      "groupReference": "d970de0c-b2ce-43a2-9747-610b817f26c2",
+      "serviceProfile": "Zoiko 30GB",
+      "serviceProfileDeviation": true
+    },
+    "error_message": "",
+    "success": true,
+    "duration_ms": 2093,
+    "created_at": "2026-09-24T10:36:12.796Z"
+  }
+},
+{
+  "model": "sims.sim",
+  "pk": 1,
+  "fields": {
+    "serial_number": "8944122666625650264",
+    "iccid": "8944122666625650264",
+    "imsi": "234336539653937",
+    "msisdn": "07529902749",
+    "type_of_sim": "",
+    "sim_reference": "",
+    "provisioning_status": "Suspended",
+    "prepaid_status": "",
+    "subscriber": "",
+    "company": "",
+    "reference": "",
+    "customer_account": "",
+    "group": "",
+    "point_of_sale": "",
+    "first_activation_date": null,
+    "last_action_date": null,
+    "last_seen_date": null,
+    "provisioning_action_number": "",
+    "subscriber_number": "",
+    "service_pack": "",
+    "service_profile": "",
+    "rate_plan": "",
+    "last_imei": "",
+    "last_origin_country": "",
+    "last_mcc": "",
+    "last_mnc": "",
+    "last_rat": "",
+    "last_destination": "",
+    "data_usage_gb": null,
+    "voice_usage": "",
+    "sms_usage": "",
+    "mms_usage": "",
+    "inventory": "INSTOCK",
+    "order_reference": "",
+    "activated_at": null,
+    "activation_transaction_id": "",
+    "pending_contact": null,
+    "esim_activation_code": "",
+    "esim_matching_id": "",
+    "esim_smdp_address": "",
+    "esim_qr_value": "",
+    "esim_qr_data_url": "",
+    "esim_qr_image": "",
+    "esim_qr_status": "",
+    "esim_qr_fetched_at": null,
+    "esim_qr_emailed": false,
+    "psim_details_emailed": false,
+    "imported_at": "2026-09-24T10:36:12.807Z"
+  }
+}
+]
