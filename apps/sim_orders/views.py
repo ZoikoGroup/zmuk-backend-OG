@@ -16,6 +16,7 @@ from .serializers import (
 )
 from . import services
 from .emails import send_activation_code_email
+from core.notify import notify_team_of_purchase
 
 logger = logging.getLogger("apps.sim_orders")
 
@@ -84,6 +85,21 @@ class SimOrdersView(APIView):
         return Response(SimOrderSerializer(orders, many=True).data)
 
 
+def _notify_team_of_sim_order(order):
+    """Tell the Zoiko team a SIM purchase was paid (best effort, never raises)."""
+    try:
+        notify_team_of_purchase(
+            "SIM purchase",
+            order.order_ref,
+            order.email,
+            order.amount_display,
+            items=[order.product.name],
+            notes=[f"Customer name: {order.customer_name}"] if order.customer_name else None,
+        )
+    except Exception:
+        logger.exception("Could not build purchase alert for %s", order.order_ref)
+
+
 @csrf_exempt  # nosemgrep: no-csrf-exempt -- Stripe webhook, verified via signature in construct_webhook_event(), not CSRF token
 def stripe_webhook(request):
     """POST /api/sim/webhook/  -> Stripe calls this. On payment success we issue
@@ -119,6 +135,7 @@ def stripe_webhook(request):
             order.status = SimOrder.STATUS_COMPLETED
             order.stripe_payment_intent_id = session.get("payment_intent", "") or ""
             order.save(update_fields=["status", "stripe_payment_intent_id"])
+            _notify_team_of_sim_order(order)
 
             # Idempotent: only issue a code if this order doesn't already have one.
             if not order.activation_codes.exists():

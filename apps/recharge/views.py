@@ -14,6 +14,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 
+from core.notify import notify_team_of_purchase
+
 
 class TransatelLookupThrottle(AnonRateThrottle):
     """Tight rate limit for endpoints that trigger live Transatel API calls.
@@ -49,6 +51,22 @@ def _send_recharge_receipt(order):
         logger.info("Recharge receipt sent to %s for %s", email, order.order_ref)
     except Exception:
         logger.exception("Failed to send recharge receipt to %s for %s", email, order.order_ref)
+
+
+def _notify_team_of_recharge(order):
+    """Tell the Zoiko team a recharge was paid (best effort, never raises)."""
+    try:
+        product = order.product.name if order.product else "Recharge"
+        notify_team_of_purchase(
+            "Recharge",
+            order.order_ref,
+            order.customer_email,
+            order.amount_display,
+            items=[product, f"Phone number: {order.msisdn or 'N/A'}"],
+            notes=[f"Customer name: {order.customer_name}"] if order.customer_name else None,
+        )
+    except Exception:
+        logger.exception("Could not build purchase alert for %s", order.order_ref)
 
 
 class PaymentThrottle(AnonRateThrottle):
@@ -685,6 +703,7 @@ class ConfirmPaymentView(APIView):
             order.save(update_fields=[
                 "status", "stripe_payment_intent_id", "paid_at", "updated_at",
             ])
+            _notify_team_of_recharge(order)
 
         # ── Reactivate (idempotent — safe if the webhook also runs) ──
         attempt = None
@@ -785,10 +804,13 @@ class ConfirmBySessionView(APIView):
 
         # Payment confirmed — store PI and mark processing
         payment_intent_id = session.payment_intent or ""
+        first_time_paid = order.paid_at is None
         order.stripe_payment_intent_id = payment_intent_id
         order.status = RechargeOrder.STATUS_PROCESSING
         order.paid_at = timezone.now()
         order.save(update_fields=["stripe_payment_intent_id", "status", "paid_at", "updated_at"])
+        if first_time_paid:
+            _notify_team_of_recharge(order)
 
         # Send receipt email to customer
         _send_recharge_receipt(order)
@@ -858,6 +880,7 @@ def stripe_webhook(request):
             order.stripe_payment_intent_id = session.payment_intent or ""
             order.paid_at = timezone.now()
             order.save(update_fields=["status", "stripe_payment_intent_id", "paid_at", "updated_at"])
+            _notify_team_of_recharge(order)
 
             logger.info("Payment confirmed for %s — triggering reactivation", order.order_ref)
 

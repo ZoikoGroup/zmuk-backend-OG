@@ -17,6 +17,8 @@ from collections import defaultdict
 
 import stripe
 
+from core.notify import notify_team_of_purchase
+
 logger = logging.getLogger("apps.orders")
 
 
@@ -63,6 +65,32 @@ def _send_checkout_receipt(payment):
         logger.info("Receipt email sent to %s for order %s", payment.email, payment.order_ref)
     except Exception:
         logger.exception("Failed to send receipt email for %s", payment.order_ref)
+
+
+def _notify_team_of_checkout(payment):
+    """Tell the Zoiko team a website checkout was paid (best effort, never raises)."""
+    try:
+        data = payment.payload or {}
+        items = []
+        for item in data.get("cart", []) or []:
+            try:
+                qty = int(item.get("quantity", 1))
+                price = float(item.get("price", 0))
+            except (TypeError, ValueError):
+                qty, price = 1, 0.0
+            name = item.get("title") or item.get("name") or "Item"
+            items.append(f"{name} x {qty} - £{price * qty:.2f}")
+        notify_team_of_purchase(
+            "Website checkout",
+            payment.order_ref,
+            payment.email,
+            f"£{payment.amount_pence / 100:.2f}",
+            items=items,
+            billing=data.get("billingAddress"),
+            shipping=data.get("shippingAddress"),
+        )
+    except Exception:
+        logger.exception("Could not build purchase alert for %s", payment.order_ref)
 
 
 class BqOrderCreateAPIView(APIView):
@@ -319,6 +347,9 @@ def _process_checkout_payment(payment: CheckoutPayment):
 
     # Send receipt email to customer
     _send_checkout_receipt(payment)
+
+    # Tell the team (runs once: the 'processed' guard above stops repeats)
+    _notify_team_of_checkout(payment)
 
 
 @csrf_exempt  # nosemgrep: no-csrf-exempt -- Stripe webhook, verified via signature, not CSRF token

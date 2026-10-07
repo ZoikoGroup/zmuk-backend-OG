@@ -438,6 +438,10 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 
 TEST_RECEIVER_EMAIL = os.getenv("TEST_RECEIVER_EMAIL")
 
+# Internal "a customer paid" alert recipient(s), comma-separated.
+# Falls back to info@zoikomobile.co.uk when unset. See core/notify.py.
+PURCHASE_NOTIFY_EMAIL = os.getenv("PURCHASE_NOTIFY_EMAIL")
+
 # =============================================================================
 # BLOG EMAIL NOTIFICATIONS
 # =============================================================================
