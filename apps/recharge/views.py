@@ -15,6 +15,7 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 
 from core.notify import notify_team_of_purchase
+from core.stripe_compat import to_plain
 
 
 class TransatelLookupThrottle(AnonRateThrottle):
@@ -866,18 +867,19 @@ def stripe_webhook(request):
     except Exception:
         return HttpResponse("Invalid signature", status=400)
 
+    event = to_plain(event)  # stripe>=15 objects are not dicts: .get() would raise
     etype = event["type"]
     logger.info("Stripe webhook received: %s", etype)
 
     if etype == "checkout.session.completed":
         session = event["data"]["object"]
-        ref = (session.metadata or {}).get("order_ref")
+        ref = (session.get("metadata") or {}).get("order_ref")
         order = RechargeOrder.objects.filter(order_ref=ref).first()
 
         if order and order.status == RechargeOrder.STATUS_PENDING:
             # Mark as processing (paid but reactivation pending)
             order.status = RechargeOrder.STATUS_PROCESSING
-            order.stripe_payment_intent_id = session.payment_intent or ""
+            order.stripe_payment_intent_id = session.get("payment_intent") or ""
             order.paid_at = timezone.now()
             order.save(update_fields=["status", "stripe_payment_intent_id", "paid_at", "updated_at"])
             _notify_team_of_recharge(order)
