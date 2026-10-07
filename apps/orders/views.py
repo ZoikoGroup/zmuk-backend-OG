@@ -18,6 +18,7 @@ from collections import defaultdict
 import stripe
 
 from core.notify import notify_team_of_purchase
+from core.stripe_compat import to_plain
 
 logger = logging.getLogger("apps.orders")
 
@@ -364,9 +365,13 @@ def checkout_webhook(request):
     if request.method != "POST":
         return HttpResponse(status=405)
 
-    secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "") or ""
+    secret = (
+        getattr(settings, "STRIPE_CHECKOUT_WEBHOOK_SECRET", "")
+        or getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
+        or ""
+    )
     if not secret:
-        logger.error("Checkout webhook rejected: STRIPE_WEBHOOK_SECRET not set")
+        logger.error("Checkout webhook rejected: no signing secret set (STRIPE_CHECKOUT_WEBHOOK_SECRET / STRIPE_WEBHOOK_SECRET)")
         return HttpResponse("Service unavailable", status=503)
 
     payload = request.body
@@ -379,6 +384,7 @@ def checkout_webhook(request):
     except stripe.error.SignatureVerificationError:
         return HttpResponse("Invalid signature", status=400)
 
+    event = to_plain(event)  # stripe>=15 objects are not dicts: .get() would raise
     etype = event["type"]
 
     if etype == "payment_intent.succeeded":
@@ -388,13 +394,18 @@ def checkout_webhook(request):
             return JsonResponse({"received": True, "ignored": "no order_ref"})
 
         payment = CheckoutPayment.objects.filter(order_ref=ref).first()
-        if payment and payment.status != CheckoutPayment.STATUS_PAID:
-            payment.status = CheckoutPayment.STATUS_PAID
-            payment.save(update_fields=["status"])
-            try:
-                _process_checkout_payment(payment)
-            except Exception:
-                logger.exception("Failed to process checkout order for %s — will need manual review", ref)
+        if payment:
+            if payment.status != CheckoutPayment.STATUS_PAID:
+                payment.status = CheckoutPayment.STATUS_PAID
+                payment.save(update_fields=["status"])
+            # _process_checkout_payment is idempotent (no-op once processed), so retrying
+            # here also rescues an order the browser-confirm call marked paid but then
+            # failed to process.
+            if not payment.processed:
+                try:
+                    _process_checkout_payment(payment)
+                except Exception:
+                    logger.exception("Failed to process checkout order for %s — will need manual review", ref)
 
     elif etype == "payment_intent.payment_failed":
         intent = event["data"]["object"]

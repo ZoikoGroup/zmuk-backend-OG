@@ -351,6 +351,10 @@ STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
+# Optional dedicated signing secret for /api/v1/checkout/webhook/. Stripe gives every
+# webhook endpoint its own secret; falls back to STRIPE_WEBHOOK_SECRET when unset.
+STRIPE_CHECKOUT_WEBHOOK_SECRET = os.getenv("STRIPE_CHECKOUT_WEBHOOK_SECRET")
+
 
 
 

@@ -17,6 +17,7 @@ from .serializers import (
 from . import services
 from .emails import send_activation_code_email
 from core.notify import notify_team_of_purchase
+from core.stripe_compat import to_plain
 
 logger = logging.getLogger("apps.sim_orders")
 
@@ -67,6 +68,7 @@ class BuySimView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        session = to_plain(session)  # stripe>=15 objects are not dicts: .get() would raise
         order.stripe_session_id = session.get("id", "")
         order.save(update_fields=["stripe_session_id"])
         return Response(
@@ -122,6 +124,7 @@ def stripe_webhook(request):
     except Exception:
         return HttpResponse("Invalid signature", status=400)
 
+    event = to_plain(event)  # stripe>=15 objects are not dicts: .get() would raise
     etype = event["type"]
 
     if etype == "checkout.session.completed":
