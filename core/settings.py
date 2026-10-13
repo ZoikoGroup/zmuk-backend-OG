@@ -74,6 +74,7 @@ INSTALLED_APPS = [
 
     "apps.plans",
     "apps.enterprise",
+    "apps.public_sector",
     "apps.travelpartners",
     "apps.coupons",
     "apps.careers",
