@@ -204,3 +204,124 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             line["transaction_id"] = a.get("transaction_id")
             lines.append(line)
         return lines
+
+
+class CustomerOrderSerializer(serializers.ModelSerializer):
+    """A logged-in customer's view of one of their own orders.
+
+    Backs GET /api/v1/sims/my-orders/ (the dashboard's SIM order history).
+    Unlike `OrderDetailSerializer` this is customer-facing, so it exposes only
+    what the customer needs: no `errors` / `payload` / raw `assigned` (Transatel
+    internals), and none of the park export's wholesale fields (rate plan,
+    customer account, IMSI, …). SIMs are sourced from the `assigned` snapshot
+    for the same reason `OrderDetailSerializer.get_sims` explains.
+    """
+
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    placed_at = serializers.DateTimeField(source="created_at", read_only=True)
+    items = serializers.SerializerMethodField()
+    sims = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = ["order_reference", "status", "status_label", "placed_at", "items", "sims"]
+        read_only_fields = fields
+
+    def get_items(self, order: Order) -> list[dict]:
+        """The plan lines the customer bought, from the checkout payload."""
+        payload = order.payload if isinstance(order.payload, dict) else {}
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return []
+        return [
+            {
+                "name": item.get("name") or "",
+                "sim_type": item.get("simType") or "",
+                "quantity": item.get("quantity") or 1,
+                "data_allowance": item.get("dataAllowance") or "",
+                "duration": item.get("duration"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+
+    def get_sims(self, order: Order) -> list[dict]:
+        assigned = [a for a in (order.assigned or []) if isinstance(a, dict)]
+        iccids = [a.get("iccid") for a in assigned if a.get("iccid")]
+        sims_by_iccid = {s.iccid: s for s in Sim.objects.filter(iccid__in=iccids)}
+
+        lines = []
+        for a in assigned:
+            sim = sims_by_iccid.get(a.get("iccid"))
+            if sim:
+                lines.append(self._sim_line(order, sim))
+            else:
+                # Sim row missing (re-imported/deleted since) — fall back to
+                # the order-time snapshot so the line still appears.
+                lines.append({
+                    "iccid": a.get("iccid"),
+                    "msisdn": a.get("msisdn") or "",
+                    "sim_type": a.get("sim_type") or "",
+                    "network_status": "",
+                    "activated_at": None,
+                    "first_activation_date": None,
+                    "last_action_date": None,
+                    "esim": None,
+                    "events": [{"type": "ordered", "label": "Order placed", "at": order.created_at}],
+                })
+        return lines
+
+    def _sim_line(self, order: Order, sim: Sim) -> dict:
+        return {
+            "iccid": sim.iccid,
+            "msisdn": sim.msisdn,
+            "sim_type": sim.sim_type_key,
+            "network_status": sim.provisioning_status,
+            "activated_at": sim.activated_at,
+            "first_activation_date": sim.first_activation_date,
+            "last_action_date": sim.last_action_date,
+            "esim": self._esim_block(sim),
+            "events": self._events(order, sim),
+        }
+
+    def _esim_block(self, sim: Sim) -> dict | None:
+        """eSIM QR / LPA details; None for physical SIMs."""
+        if not sim.is_esim:
+            return None
+        qr_image_url = None
+        if sim.esim_qr_image:
+            request = self.context.get("request")
+            url = sim.esim_qr_image.url
+            qr_image_url = request.build_absolute_uri(url) if request else url
+        return {
+            "ready": bool(sim.esim_qr_value),
+            "qr_image_url": qr_image_url,
+            "lpa": sim.esim_qr_value,
+            "smdp_address": sim.esim_smdp_address,
+            "activation_code": sim.esim_activation_code,
+            "status": sim.esim_qr_status,
+        }
+
+    @staticmethod
+    def _events(order: Order, sim: Sim) -> list[dict]:
+        """Confirmed history events, oldest first — only timestamps we hold."""
+        events = [{"type": "ordered", "label": "Order placed", "at": order.created_at}]
+
+        activated = sim.activated_at or sim.first_activation_date
+        if activated:
+            events.append({"type": "activated", "label": "SIM activated", "at": activated})
+
+        if sim.is_esim and sim.esim_qr_value and sim.esim_qr_fetched_at:
+            if sim.esim_qr_emailed:
+                events.append({"type": "qr_sent", "label": "eSIM QR code emailed",
+                               "at": sim.esim_qr_fetched_at})
+            else:
+                events.append({"type": "qr_ready", "label": "eSIM QR code ready",
+                               "at": sim.esim_qr_fetched_at})
+
+        if sim.last_action_date and sim.last_action_date != activated:
+            events.append({"type": "last_update", "label": "Last SIM update",
+                           "at": sim.last_action_date})
+
+        events.sort(key=lambda e: e["at"])
+        return events

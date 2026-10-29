@@ -20,7 +20,9 @@ from __future__ import annotations
 import logging
 import time
 
+from django.db.models import Q
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -29,6 +31,7 @@ from .esim import deliver_qr
 from .psim import deliver_details
 from .models import Order, Sim
 from .serializers import (
+    CustomerOrderSerializer,
     LatestAvailableSimSerializer,
     OrderDetailSerializer,
     ReleaseSerializer,
@@ -399,3 +402,29 @@ class OrdersByUserView(APIView):
         orders = Order.objects.filter(email__iexact=email)
         data = OrderDetailSerializer(orders, many=True, context={"request": request}).data
         return Response({"success": True, "orders": data})
+
+
+class MyOrdersView(APIView):
+    """GET /api/v1/sims/my-orders/  → the logged-in customer's SIM orders.
+
+    Feeds the dashboard's SIM order history. Requires the account token
+    (`Authorization: Token <key>`); the customer is taken from the token, never
+    from the request, so nobody can read someone else's orders. Orders are
+    matched on the account email against the order's email or billing email,
+    most recent first, capped at `MAX_ORDERS`.
+    """
+
+    permission_classes = [IsAuthenticated]
+    MAX_ORDERS = 50
+
+    def get(self, request):
+        email = (request.user.email or "").strip()
+        if not email:
+            # A blank email would match every order saved without one.
+            return Response({"success": True, "count": 0, "orders": []})
+
+        orders = Order.objects.filter(
+            Q(email__iexact=email) | Q(billing_email__iexact=email)
+        ).order_by("-created_at")[: self.MAX_ORDERS]
+        data = CustomerOrderSerializer(orders, many=True, context={"request": request}).data
+        return Response({"success": True, "count": len(data), "orders": data})
