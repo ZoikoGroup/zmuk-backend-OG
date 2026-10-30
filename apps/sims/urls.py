@@ -14,6 +14,7 @@ With flat app-level paths (no inner "sims/"), that resolves to:
     POST /api/v1/sims/sim-orders/            <- ProcessOrder step 3 (activate)
     GET  /api/v1/sims/orders/<order_reference>/   <- order section: one order + SIMs/QR
     POST /api/v1/sims/orders/by-user/             <- order section: { email } -> orders[]
+    GET  /api/v1/sims/my-orders/                  <- dashboard SIM order history (token auth)
 
 NOTE: the two Next.js proxy routes must target these exact paths --
   app/api/transatel/sim/availability/route.ts  -> /api/v1/sims/availability/latest/
@@ -40,6 +41,7 @@ urlpatterns = [
     path("reserve/",             api.ReserveView.as_view(),              name="reserve"),
     path("release/",             api.ReleaseView.as_view(),              name="release"),
     path("sim-orders/",          api.SimOrderView.as_view(),             name="sim-orders"),
+    path("my-orders/",                   api.MyOrdersView.as_view(),     name="my-orders"),
     path("orders/by-user/",              api.OrdersByUserView.as_view(), name="orders-by-user"),
     path("orders/<str:order_reference>/", api.OrderDetailView.as_view(), name="order-detail"),
 ]
