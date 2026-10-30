@@ -25,7 +25,9 @@ from .serializers import (
     ResetPasswordSerializer,
     UpdateUserSerializer,
     ChangePasswordSerializer,
+    ProfilePreferencesSerializer,
 )
+from .models import UserProfile
 from .utils import get_safe_frontend_origin
 
 logger = logging.getLogger("apps.accounts")
@@ -34,6 +36,20 @@ GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 
 # Fields never returned by the dashboard endpoint.
 _DASHBOARD_EXCLUDED_FIELDS = {"password"}
+
+# UserProfile fields added to the dashboard response (preferences handled separately).
+_DASHBOARD_PROFILE_FIELDS = (
+    "bq_enrollment_id", "preferred_name", "phone_number",
+    "billing_address", "delivery_address",
+)
+
+
+def _ensure_profile(user):
+    """Return the user's profile, creating it if missing (e.g. users created
+    before the post_save signal existed) so `user.profile` never 500s."""
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    user.profile = profile
+    return profile
 
 
 # ── Email helper ──────────────────────────────────────────────────────────────
@@ -177,12 +193,19 @@ class DashboardAPI(APIView):
 
     def get(self, request):
         user = request.user
+        profile = _ensure_profile(user)
         # FIX: previously returned every model field, including the password hash.
-        return Response({
+        data = {
             field.name: getattr(user, field.name)
             for field in user._meta.fields
             if field.name not in _DASHBOARD_EXCLUDED_FIELDS
+        }
+        data.update({
+            field: getattr(profile, field)
+            for field in _DASHBOARD_PROFILE_FIELDS
         })
+        data["preferences"] = ProfilePreferencesSerializer(profile.preferences).data
+        return Response(data)
 
 
 # ---------------- FORGOT PASSWORD ----------------
@@ -256,7 +279,13 @@ class ResetPasswordAPI(APIView):
 class UpdateUserAPI(APIView):
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        _ensure_profile(request.user)
+        serializer = UpdateUserSerializer(request.user, context={"request": request})
+        return Response(serializer.data)
+
     def put(self, request):
+        _ensure_profile(request.user)
         serializer = UpdateUserSerializer(
             request.user,
             data=request.data,
@@ -266,12 +295,9 @@ class UpdateUserAPI(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        response_data = serializer.data
-        response_data["bq_enrollment_id"] = getattr(request.user.profile, "bq_enrollment_id", None)
-
         return Response({
             "message": "Profile updated successfully",
-            "user": response_data
+            "user": serializer.data
         })
 
 
