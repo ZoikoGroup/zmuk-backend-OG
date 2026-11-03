@@ -89,6 +89,7 @@ INSTALLED_APPS = [
     "apps.security",
     "apps.support",
     "apps.sims",
+    "apps.add_line",
 
     # Third-party apps
     "django_ckeditor_5",
@@ -409,6 +410,47 @@ TRANSATEL = {
 RECHARGE_ALLOWED_SIM_STATUSES = [
     "suspended",
 ]
+
+# =============================================================================
+# ADD A NEW NUMBER (apps.add_line)
+# =============================================================================
+
+# Consumer line cap per verified account (decision A2); support can override.
+MAX_CONSUMER_LINES = int(os.getenv("MAX_CONSUMER_LINES", "5"))
+
+# How long a checkout holds a line slot before payment.
+LINE_HOLD_MINUTES = int(os.getenv("LINE_HOLD_MINUTES", "30"))
+
+# Checkout requires a login within this many minutes (decision A4).
+ADD_LINE_REAUTH_MINUTES = int(os.getenv("ADD_LINE_REAUTH_MINUTES", "60"))
+
+# How long a signed price quote stays valid for checkout.
+ADD_LINE_QUOTE_MINUTES = int(os.getenv("ADD_LINE_QUOTE_MINUTES", "30"))
+
+# Contract / contract-summary versions the customer must accept at checkout.
+# Legal publishes these; checkout rejects any other version.
+ADD_LINE_CONTRACT_VERSION = os.getenv("ADD_LINE_CONTRACT_VERSION", "draft-1")
+ADD_LINE_CONTRACT_SUMMARY_VERSION = os.getenv("ADD_LINE_CONTRACT_SUMMARY_VERSION", "draft-1")
+
+# Days a raw PAC/STAC is kept after the transfer ends (decision C13).
+PAC_RETENTION_DAYS = int(os.getenv("PAC_RETENTION_DAYS", "7"))
+
+# Fernet key for PAC/STAC encryption at rest. Generate with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+PAC_ENCRYPTION_KEY = os.getenv("PAC_ENCRYPTION_KEY", "")
+
+# Auto-link an existing SIM when ICCID + order reference + verified account
+# email all agree (decision A1); False sends every claim to support review.
+ADD_LINE_CLAIM_AUTO_APPROVE = os.getenv("ADD_LINE_CLAIM_AUTO_APPROVE", "True") == "True"
+
+# In-flight transfers with no update for this long are reported for support.
+PORT_STALE_HOURS = int(os.getenv("PORT_STALE_HOURS", "48"))
+
+# Shared secret for X-TSL-Signature-256 on Transatel webhooks.
+TRANSATEL_WEBHOOK_SECRET = os.getenv("TRANSATEL_WEBHOOK_SECRET", "")
+
+# Signing secret for the add-line Stripe webhook endpoint.
+STRIPE_ADD_LINE_WEBHOOK_SECRET = os.getenv("STRIPE_ADD_LINE_WEBHOOK_SECRET")
 
 # =============================================================================
 # EMAIL / SMTP
