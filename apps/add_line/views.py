@@ -131,6 +131,11 @@ class QuoteView(APIView):
             "quote": quote.as_dict(),
             "quote_token": issue_token(request.user, quote),
             "expires_in_seconds": settings.ADD_LINE_QUOTE_MINUTES * 60,
+            # Versions the customer accepts at checkout; sent back unchanged.
+            "contract": {
+                "contract_version": settings.ADD_LINE_CONTRACT_VERSION,
+                "contract_summary_version": settings.ADD_LINE_CONTRACT_SUMMARY_VERSION,
+            },
         })
 
 

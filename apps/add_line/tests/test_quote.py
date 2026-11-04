@@ -112,3 +112,4 @@ class QuoteTests(TestCase):
         self.assertEqual(body["quote"]["charge_today"], "10.00")
         self.assertTrue(body["quote_token"])
         self.assertEqual(body["expires_in_seconds"], 1800)
+        self.assertEqual(set(body["contract"]), {"contract_version", "contract_summary_version"})
