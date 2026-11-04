@@ -50,6 +50,13 @@ class Coupon(models.Model):
 
     is_use_once_per_customer = models.BooleanField(default=True)
 
+    # Add-a-New-Number checkout only accepts coupons expressly opened to
+    # additional lines (decision A3); acquisition offers stay off by default.
+    valid_for_additional_lines = models.BooleanField(
+        default=False,
+        help_text="Allow this coupon when an existing customer adds another line.",
+    )
+
     # ✅ MULTI PLANS
     plans = models.ManyToManyField(
         Plan,

@@ -17,10 +17,11 @@ class CouponAdmin(admin.ModelAdmin):
         "discount",
         "limit",
         "is_use_once_per_customer",
+        "valid_for_additional_lines",
     )
 
     search_fields = ("name", "slug")
-    list_filter = ("type", "is_use_once_per_customer")
+    list_filter = ("type", "is_use_once_per_customer", "valid_for_additional_lines")
 
     filter_horizontal = ("users", "plans")
 

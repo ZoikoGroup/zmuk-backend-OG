@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authtoken.models import Token
 
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, update_last_login
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -161,6 +161,9 @@ class LoginAPI(APIView):
 
         user = serializer.validated_data
         token, _ = Token.objects.get_or_create(user=user)
+        # Token auth never calls login(), so record it here; add-line uses
+        # last_login as its "recent login" check.
+        update_last_login(None, user)
 
         return Response({
             "message": "Login successful",
@@ -396,6 +399,7 @@ class SocialUserAPI(APIView):
                 user.save(update_fields=["first_name", "last_name"])
 
         token, _ = Token.objects.get_or_create(user=user)
+        update_last_login(None, user)
 
         return Response({
             "message": "Social login successful",

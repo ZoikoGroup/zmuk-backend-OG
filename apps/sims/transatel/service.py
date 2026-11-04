@@ -43,6 +43,9 @@ _SUBSCRIBER_BASE = "/connectivity-management/subscribers/api/subscribers/sim-ser
 # a ready-to-scan QR (LPA string + base64 PNG data URL).
 _ESIM_BASE = "/sim-management/sims/api/esims/sim-serial/"
 
+# UK port-in / switch-in requests (PAC or STAC).
+_PORTABILITY_UK_BASE = "/connectivity-management/api/portability/uk/sim-serial/"
+
 # Statuses (case-insensitive) that mean the SIM is already live, so we add the
 # package via /modify instead of /activate.
 _ACTIVE_STATUSES = {"active", "activated", "suspended"}
@@ -232,6 +235,34 @@ class TransatelService:
         }
         logger.info("Transatel contact-info %s", serial_number)
         result = self.client.put(endpoint, payload)
+        return result["data"]
+
+    # ── UK number portability (port-in / switch-in) ───────────────────────
+
+    def request_uk_port_in(self, serial_number, msisdn, code_type, code,
+                           wished_date=None) -> dict:
+        """Submit a PAC (keep number) or STAC switch for an active SIM.
+
+        POST /connectivity-management/api/portability/uk/sim-serial/{serial}/request
+
+        Asynchronous: a 201 returns ``{transactionId, simSerial,
+        transactionStatus: "PENDING"}``, which only means the request was
+        received. The outcome (VALIDATED / INVALIDATED / LOCKED / DONE)
+        arrives later as portability events. ``wished_date`` is an ISO date;
+        without it Transatel switches on network attach.
+        """
+        endpoint = (
+            _PORTABILITY_UK_BASE + quote(str(serial_number), safe="") + "/request"
+        )
+        payload = {
+            "portabilityMSISDN": msisdn,
+            "authorizationCode": {"type": code_type, "code": code},
+        }
+        if wished_date:
+            payload["wishedPortabilityDate"] = str(wished_date)
+        # The code itself is never logged.
+        logger.info("Transatel UK %s request %s", code_type, serial_number)
+        result = self.client.post(endpoint, payload)
         return result["data"]
 
     # ── Orchestration ─────────────────────────────────────────────────────
