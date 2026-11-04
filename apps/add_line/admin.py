@@ -85,7 +85,8 @@ class AddLineOrderAdmin(admin.ModelAdmin):
     raw_id_fields = ("owner", "hold", "line", "reserved_sim", "sim_order", "plan", "coupon")
     readonly_fields = (
         "order_reference", "quote", "quote_hash", "total_gross", "vat_amount", "billing",
-        "stripe_payment_intent_id", "paid_at", "created_at", "updated_at",
+        "stripe_payment_intent_id", "paid_at", "last_payment_error", "payment_failed_at",
+        "created_at", "updated_at",
     )
     inlines = [ContractAcceptanceInline]
 

@@ -29,8 +29,12 @@ from .serializers import (
 )
 from .services import capacity, checkout, claims, eligibility, pac, payments, porting
 from .services.quote import QuoteError, build_quote, issue_token
+from .services.secrets import request_problem, usable_secret
 
 logger = logging.getLogger("apps.add_line")
+
+# PaymentIntent events are a few KB; anything far larger isn't from Stripe.
+STRIPE_WEBHOOK_MAX_BYTES = 256 * 1024
 
 
 def _error(code, message, http_status):
@@ -218,6 +222,8 @@ class ConfirmPaymentView(APIView):
                 logger.exception("Could not retrieve PaymentIntent for %s", order.order_reference)
                 return _error("PAYMENT_CHECK_FAILED", "We couldn't check your payment yet.", 502)
             if intent.get("status") != "succeeded":
+                if intent.get("last_payment_error"):
+                    payments.record_payment_failure(order, intent)
                 return _error("PAYMENT_NOT_COMPLETED", "Payment not completed yet.", 402)
             try:
                 order = payments.handle_payment_succeeded(order, intent)
@@ -287,15 +293,21 @@ def stripe_webhook(request):
 
     Source of truth for "paid" on add-line orders. Only PaymentIntents created
     by add-line checkout (metadata.source) are handled; everything else is
-    acknowledged and ignored.
+    acknowledged and ignored. A 500 is returned only when the paid state could
+    not be saved, so Stripe retries; retrying can't fix a mismatch, so those
+    are acknowledged and logged.
     """
     if request.method != "POST":
         return HttpResponse(status=405)
 
-    secret = settings.STRIPE_ADD_LINE_WEBHOOK_SECRET or ""
+    secret = usable_secret(settings.STRIPE_ADD_LINE_WEBHOOK_SECRET)
     if not secret:
-        logger.error("Add-line Stripe webhook rejected: STRIPE_ADD_LINE_WEBHOOK_SECRET not set")
+        logger.error("Add-line Stripe webhook rejected: STRIPE_ADD_LINE_WEBHOOK_SECRET not set or a placeholder")
         return HttpResponse("Service unavailable", status=503)
+
+    problem = request_problem(request, STRIPE_WEBHOOK_MAX_BYTES)
+    if problem:
+        return HttpResponse(problem[1], status=problem[0])
 
     try:
         event = stripe.Webhook.construct_event(
@@ -307,6 +319,10 @@ def stripe_webhook(request):
         return HttpResponse("Invalid signature", status=400)
 
     event = to_plain(event)
+    if event.get("livemode") is not payments.expected_livemode():
+        logger.error("Add-line webhook %s ignored: livemode does not match this environment", event.get("id"))
+        return JsonResponse({"received": True, "ignored": "wrong mode"})
+
     intent = event["data"]["object"]
     metadata = intent.get("metadata") or {}
     if metadata.get("source") != checkout.STRIPE_SOURCE:
@@ -317,19 +333,22 @@ def stripe_webhook(request):
         logger.error("Add-line webhook for unknown order %s", metadata.get("add_line_order"))
         return JsonResponse({"received": True, "ignored": "unknown order"})
 
-    if event["type"] == "payment_intent.succeeded":
-        try:
+    try:
+        if event["type"] == "payment_intent.succeeded":
+            # Fulfilment errors are absorbed inside; anything raised here means
+            # the paid state was not saved.
             payments.handle_payment_succeeded(order, intent)
-        except payments.PaymentMismatch:
-            logger.exception("PaymentIntent mismatch in webhook")
-        except Exception:
-            # Paid state is committed before fulfilment; retry_add_line_fulfilment
-            # picks up anything that failed after that.
-            logger.exception("Add-line payment handling failed for %s", order.order_reference)
-    elif event["type"] == "payment_intent.canceled":
-        if order.payment_status == AddLineOrder.PaymentStatus.PENDING:
-            checkout.release(order, "payment_canceled")
-    # payment_intent.payment_failed is deliberately ignored: the customer can
-    # retry the same PaymentIntent until the checkout hold expires.
+        elif event["type"] == "payment_intent.payment_failed":
+            payments.record_payment_failure(order, intent)
+        elif event["type"] == "payment_intent.canceled":
+            if order.payment_status == AddLineOrder.PaymentStatus.PENDING:
+                checkout.release(order, "payment_canceled")
+    except payments.PaymentMismatch:
+        logger.exception("PaymentIntent mismatch in webhook")
+        return JsonResponse({"received": True, "ignored": "mismatch"})
+    except Exception:
+        logger.exception("Add-line webhook %s failed for %s; asking Stripe to retry",
+                         event["type"], order.order_reference)
+        return HttpResponse("Processing failed", status=500)
 
     return JsonResponse({"received": True})

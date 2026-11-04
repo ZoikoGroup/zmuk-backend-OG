@@ -73,6 +73,8 @@ def _order_message(order: AddLineOrder) -> str:
     if order.fulfilment_status == F.CANCELLED:
         return "This order was cancelled."
     if order.payment_status != AddLineOrder.PaymentStatus.PAID:
+        if order.last_payment_error:
+            return "Your last payment attempt didn't go through. You can try again."
         return "Waiting for payment."
     if order.fulfilment_status == F.ACTIVATED:
         return "Your Zoiko service is active."
@@ -205,17 +207,29 @@ class LineClaimSerializer(serializers.ModelSerializer):
 class AddLineOrderSerializer(serializers.ModelSerializer):
     message = serializers.SerializerMethodField()
     line = serializers.SerializerMethodField()
+    payment_error = serializers.SerializerMethodField()
 
     class Meta:
         model = AddLineOrder
         fields = (
             "order_reference", "payment_status", "fulfilment_status", "message",
             "sim_type", "switch_choice", "term", "quote", "total_gross", "vat_amount",
-            "currency", "line", "created_at", "paid_at",
+            "currency", "line", "created_at", "paid_at", "payment_error",
         )
 
     def get_message(self, order):
         return _order_message(order)
+
+    def get_payment_error(self, order):
+        """Latest decline while the order is still unpaid; None otherwise."""
+        error = order.last_payment_error
+        if not error or order.payment_status != AddLineOrder.PaymentStatus.PENDING:
+            return None
+        return {
+            "code": error.get("decline_code") or error.get("code") or "payment_failed",
+            "message": error.get("message") or "Your payment was declined.",
+            "at": order.payment_failed_at,
+        }
 
     def get_line(self, order):
         line: Line = order.line

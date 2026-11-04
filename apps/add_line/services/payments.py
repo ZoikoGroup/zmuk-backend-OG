@@ -9,6 +9,7 @@ waits for Transatel (see `fulfilment`).
 import logging
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
@@ -26,9 +27,17 @@ class PaymentMismatch(Exception):
     """The PaymentIntent doesn't match the order it claims to pay for."""
 
 
+def expected_livemode() -> bool:
+    """Live keys take live payments only; test keys take test payments only."""
+    key = getattr(settings, "STRIPE_SECRET_KEY", "") or ""
+    return key.startswith(("sk_live_", "rk_live_"))
+
+
 def _verify(order: AddLineOrder, intent: dict):
     pence = int(Decimal(order.total_gross) * 100)
     problems = []
+    if intent.get("livemode") is not expected_livemode():
+        problems.append("livemode")
     if intent.get("id") != order.stripe_payment_intent_id:
         problems.append("intent id")
     if (intent.get("metadata") or {}).get("add_line_order") != order.order_reference:
@@ -45,8 +54,6 @@ def _verify(order: AddLineOrder, intent: dict):
 
 def handle_payment_succeeded(order: AddLineOrder, intent) -> AddLineOrder:
     """Mark the order paid (once), then try to fulfil it."""
-    from .fulfilment import fulfil
-
     intent = to_plain(intent)
     _verify(order, intent)
 
@@ -71,13 +78,48 @@ def handle_payment_succeeded(order: AddLineOrder, intent) -> AddLineOrder:
             order.fulfilment_status = AddLineOrder.FulfilmentStatus.NOT_STARTED
             order.save(update_fields=["fulfilment_status", "updated_at"])
 
-    return fulfil(order)
+    return _fulfil_after_payment(order)
+
+
+def _fulfil_after_payment(order: AddLineOrder) -> AddLineOrder:
+    """Paid is already committed, so an activation error must not surface as a
+    payment error; retry_add_line_fulfilment picks the order up."""
+    from .fulfilment import fulfil
+
+    try:
+        return fulfil(order)
+    except Exception:
+        logger.exception("Fulfilment after payment failed for %s; retry job will continue",
+                         order.order_reference)
+        order.refresh_from_db()
+        return order
+
+
+def record_payment_failure(order: AddLineOrder, intent) -> bool:
+    """Note a declined attempt for support and the customer. The order and its
+    line slot stay open: the customer can retry until the checkout hold expires."""
+    intent = to_plain(intent)
+    if intent.get("id") != order.stripe_payment_intent_id:
+        raise PaymentMismatch(f"{order.order_reference}: mismatched intent id")
+    error = intent.get("last_payment_error") or {}
+    with transaction.atomic():
+        order = AddLineOrder.objects.select_for_update().get(pk=order.pk)
+        if order.payment_status != AddLineOrder.PaymentStatus.PENDING:
+            return False
+        # Stripe's code and customer-safe message only; never card details.
+        order.last_payment_error = {
+            key: error.get(key) for key in ("type", "code", "decline_code", "message") if error.get(key)
+        }
+        order.payment_failed_at = timezone.now()
+        order.save(update_fields=["last_payment_error", "payment_failed_at", "updated_at"])
+        audit.record("payment_failed", order=order, after=order.payment_status,
+                     payment_intent=order.stripe_payment_intent_id,
+                     code=error.get("code", ""), decline_code=error.get("decline_code", ""))
+    return True
 
 
 def mark_free_order_paid(order: AddLineOrder) -> AddLineOrder:
     """£0 orders (100% promo) skip Stripe entirely."""
-    from .fulfilment import fulfil
-
     with transaction.atomic():
         order = AddLineOrder.objects.select_for_update().get(pk=order.pk)
         if order.payment_status != AddLineOrder.PaymentStatus.PAID:
@@ -89,7 +131,7 @@ def mark_free_order_paid(order: AddLineOrder) -> AddLineOrder:
             if order.coupon_id:
                 _record_coupon_use(order)
             audit.record("payment_succeeded", order=order, after=order.payment_status, free=True)
-    return fulfil(order)
+    return _fulfil_after_payment(order)
 
 
 def _record_coupon_use(order: AddLineOrder):
