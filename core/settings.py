@@ -90,6 +90,7 @@ INSTALLED_APPS = [
     "apps.support",
     "apps.sims",
     "apps.add_line",
+    "apps.roaming",
 
     # Third-party apps
     "django_ckeditor_5",
@@ -456,6 +457,14 @@ TRANSATEL_WEBHOOK_SECRET = os.getenv("TRANSATEL_WEBHOOK_SECRET", "")
 
 # Signing secret for the add-line Stripe webhook endpoint.
 STRIPE_ADD_LINE_WEBHOOK_SECRET = os.getenv("STRIPE_ADD_LINE_WEBHOOK_SECRET")
+
+# =============================================================================
+# ROAMING & TRAVEL (apps.roaming)
+# =============================================================================
+
+# A register row last validated longer ago than this gives STALE instead of a
+# personalised quote (ROAM-005 §04, CT-001 §09-5).
+ROAMING_REGISTER_STALE_DAYS = int(os.getenv("ROAMING_REGISTER_STALE_DAYS", "90"))
 
 # =============================================================================
 # EMAIL / SMTP

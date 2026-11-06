@@ -41,6 +41,7 @@ path("api/", include("apps.contact.urls")),
     path("api/v1/", include("apps.orders.urls")),
     path("api/v1/sims/", include("apps.sims.urls")),  # sim-orders/ (reserve+activate via Transatel), sims/availability/, sims/reserve/, sims/release/
     path("api/v1/lines/", include("apps.add_line.urls")),  # Add a New Number: lines, eligibility, checkout, porting
+    path("api/v1/", include("apps.roaming.urls")),  # Roaming & Travel: destinations, lines/<id>/roaming-quote/
     path("api/", include("apps.enterprise.urls")),
     path("api/", include("apps.public_sector.urls")),
     path('api/', include('apps.integrations.urls')),
