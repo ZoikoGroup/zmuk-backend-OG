@@ -307,7 +307,7 @@ def stripe_webhook(request):
 
     problem = request_problem(request, STRIPE_WEBHOOK_MAX_BYTES)
     if problem:
-        return HttpResponse(problem[1], status=problem[0])
+        return JsonResponse({"error": problem[1]}, status=problem[0])
 
     try:
         event = stripe.Webhook.construct_event(

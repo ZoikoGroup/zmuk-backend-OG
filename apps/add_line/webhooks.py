@@ -27,7 +27,7 @@ import logging
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Q
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
@@ -97,7 +97,7 @@ def transatel_webhook(request):
 
     problem = request_problem(request, MAX_BODY_BYTES)
     if problem:
-        return HttpResponse(problem[1], status=problem[0])
+        return JsonResponse({"error": problem[1]}, status=problem[0])
 
     body = request.body
     if not signature_is_valid(body, request.META.get(_SIGNATURE_HEADER, ""), secret):
