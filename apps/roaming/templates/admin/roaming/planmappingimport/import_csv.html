@@ -1,0 +1,46 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+{% block content %}
+  <h1>{{ title }}</h1>
+  <p>Upload the plan-to-tariff mapping (<code>*.csv</code>, UTF-8, header exactly as the agreed 7-column template).
+     The whole file is checked first and applied <strong>only if every row is valid</strong>. Rows identical to an
+     existing mapping are skipped. Deleting an import batch removes the mappings it created.</p>
+  <p>Required columns: <code>{{ required_columns|join:", " }}</code>.<br>
+     All columns: <code>{{ columns|join:", " }}</code>.</p>
+  <ul>
+    <li><code>zoiko_plan_name</code> must match exactly one plan in the catalogue (a leading "Zoiko" is ignored).</li>
+    <li><code>term</code> is <code>30D</code>, <code>12M</code> or <code>24M</code>; blank means every term.</li>
+    <li><code>plan_sku</code> + <code>plan_version</code> must exist in an active or draft register — import the
+        register first. Example SKUs are rejected.</li>
+    <li><code>effective_from</code>/<code>effective_to</code> are the line <em>activation</em> window for this
+        version; windows for the same plan and term must not overlap.</li>
+  </ul>
+
+  {% if result %}
+    {% if result.problems %}
+      <p class="errornote">Not applied: {{ result.problems|length }} problem(s) in {{ result.row_count }} row(s).
+         Fix them in the source and upload again.</p>
+      <table>
+        <thead><tr><th>Row</th><th>Plan name</th><th>Field</th><th>Problem</th><th>Owner</th></tr></thead>
+        <tbody>
+          {% for p in result.problems %}
+            <tr><td>{{ p.row }}</td><td>{{ p.plan_name }}</td><td>{{ p.field }}</td><td>{{ p.rule }}</td>
+                <td>{{ p.owner }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% elif result.dry_run %}
+      <p class="success">Valid: {{ result.row_count }} row(s) — {{ result.created }} would be created,
+         {{ result.skipped }} already present. Untick "Validate only" and upload again to apply.</p>
+    {% endif %}
+  {% endif %}
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <table>{{ form.as_table }}</table>
+    <div class="submit-row">
+      <input type="submit" value="{% translate 'Upload' %}" class="default">
+      <a href="../" class="button cancel-link">{% translate 'Cancel' %}</a>
+    </div>
+  </form>
+{% endblock %}

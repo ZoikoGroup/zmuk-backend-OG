@@ -2,7 +2,8 @@
 
 Usage:
     python manage.py import_roaming_register register.csv --label 2026-11-parity-r1 \
-        --validation-date 2026-11-09 --source-system "WordPress + billing export" [--activate]
+        --validation-date 2026-11-09 --source-system "Billing rating export" \
+        [--report rejections.csv] [--activate]
 """
 
 from datetime import date
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.roaming.services import importer
+from apps.roaming.services import importer, reports
 
 
 class Command(BaseCommand):
@@ -22,6 +23,7 @@ class Command(BaseCommand):
         parser.add_argument("--validation-date", required=True, type=date.fromisoformat)
         parser.add_argument("--source-system", default="")
         parser.add_argument("--notes", default="")
+        parser.add_argument("--report", help="Write the row-level rejection report to this CSV file.")
         parser.add_argument("--activate", action="store_true",
                             help="Make this version live immediately (only if it has no unresolved rows).")
 
@@ -41,6 +43,10 @@ class Command(BaseCommand):
                           f"{version.unresolved_count} unresolved.")
         for entry in version.entries.filter(row_status="unresolved")[:20]:
             self.stdout.write(self.style.WARNING(f"  row {entry.row_number}: {entry.unresolved_reason}"))
+        if options["report"]:
+            with open(options["report"], "w", encoding="utf-8", newline="") as stream:
+                reports.write_report(stream, reports.REGISTER_REPORT_COLUMNS, reports.register_report_rows(version))
+            self.stdout.write(f"Rejection report written to {options['report']}.")
 
         if options["activate"]:
             if version.unresolved_count:

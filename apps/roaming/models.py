@@ -162,8 +162,9 @@ class RegisterEntry(models.Model):
     rate_sms = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
     rate_mms = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
     rate_units_rounding = models.CharField(max_length=255, blank=True, default="")
-    vat_basis = models.CharField(max_length=32, blank=True, default="")
-    currency = models.CharField(max_length=3, default="GBP")
+    vat_basis = models.CharField(max_length=32, blank=True, default="")  # inclusive / exclusive; blank = unknown
+    # Blank = unknown. Never defaulted: without a sourced currency no price is shown.
+    currency = models.CharField(max_length=3, blank=True, default="")
 
     exhaustion_action = models.CharField(max_length=16, choices=Exhaustion.choices, default=Exhaustion.UNKNOWN)
     applicable_spend_control = models.CharField(max_length=255, blank=True, default="")
@@ -178,6 +179,9 @@ class RegisterEntry(models.Model):
     row_number = models.PositiveIntegerField(help_text="Line number in the imported file.")
     row_status = models.CharField(max_length=16, choices=RowStatus.choices, default=RowStatus.RESOLVED, db_index=True)
     unresolved_reason = models.TextField(blank=True, default="")
+    # Machine-readable form of `unresolved_reason`: [{"field", "rule", "owner"}, ...]
+    # (Engineering Decision v2 App. B: row-level rejection report).
+    problems = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ["version", "row_number"]
@@ -188,6 +192,31 @@ class RegisterEntry(models.Model):
 
     def __str__(self):
         return f"{self.plan_sku or 'general'} {self.plan_version} · {self.territory_code}"
+
+
+class PlanMappingImport(models.Model):
+    """One uploaded plan-to-tariff mapping CSV.
+
+    A file is applied only when every row is valid. Deleting the batch
+    removes exactly the mappings it created (rollback).
+    """
+
+    checksum = models.CharField(max_length=64, unique=True)
+    file_name = models.CharField(max_length=255, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    row_count = models.PositiveIntegerField(default=0)
+    created_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0, help_text="Rows identical to an existing mapping.")
+    imported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    imported_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-imported_at"]
+
+    def __str__(self):
+        return f"{self.file_name or 'plan mapping'} ({self.imported_at:%Y-%m-%d %H:%M})"
 
 
 class PlanTariffMap(models.Model):
@@ -204,6 +233,11 @@ class PlanTariffMap(models.Model):
     effective_from = models.DateField()
     effective_to = models.DateField(null=True, blank=True)
     notes = models.CharField(max_length=255, blank=True, default="")
+    # Null when entered by hand in the admin.
+    import_batch = models.ForeignKey(
+        PlanMappingImport, on_delete=models.CASCADE, null=True, blank=True, related_name="mappings"
+    )
+    source_row = models.PositiveIntegerField(null=True, blank=True, help_text="Line number in the imported file.")
 
     class Meta:
         ordering = ["plan", "term", "-effective_from"]

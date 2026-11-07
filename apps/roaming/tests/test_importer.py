@@ -49,10 +49,11 @@ class RegisterImportTests(TestCase):
         self.assertEqual(entry.row_status, RegisterEntry.RowStatus.UNRESOLVED)
         self.assertEqual(entry.inclusion, RegisterEntry.Inclusion.UNKNOWN)
 
-    def test_duplicate_row_is_unresolved(self):
+    def test_duplicate_rows_are_both_unresolved(self):
+        # No "last row wins": neither copy is trusted (Decision v2 A09).
         version = load_register([included_row("FR"), included_row("FR")], activate=False)
         statuses = list(version.entries.values_list("row_status", flat=True))
-        self.assertEqual(statuses, ["resolved", "unresolved"])
+        self.assertEqual(statuses, ["unresolved", "unresolved"])
 
     def test_unlimited_voice_and_sms(self):
         version = load_register(
