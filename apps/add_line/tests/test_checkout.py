@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
+from secrets import token_hex
 from types import SimpleNamespace
 from unittest import mock
 
@@ -22,7 +23,8 @@ from apps.sims.transatel import TransatelAPIError
 CHECKOUT_URL = "/api/v1/lines/checkout/"
 SETTINGS = dict(
     STRIPE_SECRET_KEY="sk_test_x",
-    STRIPE_ADD_LINE_WEBHOOK_SECRET="whsec_test_4f9c2a7e1b8d6035",
+    # Random per run: construct_event is mocked, the value only has to pass usable_secret().
+    STRIPE_ADD_LINE_WEBHOOK_SECRET=f"whsec_{token_hex(16)}",
     MAX_CONSUMER_LINES=5,
     LINE_HOLD_MINUTES=30,
     ADD_LINE_REAUTH_MINUTES=60,
