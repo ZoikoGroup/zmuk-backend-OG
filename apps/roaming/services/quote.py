@@ -12,6 +12,7 @@ figure is null, never 0.
     row older than ROAMING_REGISTER_STALE_DAYS → STALE
     otherwise                               → READY_PERSONALISED with outcome
         supplier_availability not_available → NOT_SUPPORTED
+        VAT basis / currency / rounding blank → TARIFF_MAPPING_PENDING (no money quote)
         inclusion included                  → INCLUDED_WITH_LIMIT
         inclusion not_included + a known rate → STANDARD_CHARGES
         anything else unknown               → TARIFF_MAPPING_PENDING
@@ -74,6 +75,16 @@ def _rates(entry: RegisterEntry) -> dict:
 
 def _has_any_rate(entry: RegisterEntry) -> bool:
     return any(getattr(entry, field) is not None for _, field, _ in RATE_TILES)
+
+
+# Without these a price can't be stated accurately, so no money quote is
+# shown (Decision v2 §7 and Data Dictionary: "Missing basis blocks monetary
+# personal quote").
+CHARGING_BASIS_FIELDS = ("vat_basis", "currency", "rate_units_rounding")
+
+
+def _charging_basis_known(entry: RegisterEntry) -> bool:
+    return all(getattr(entry, field) for field in CHARGING_BASIS_FIELDS)
 
 
 def _charging(entry: RegisterEntry) -> dict:
@@ -181,8 +192,9 @@ def line_quote(user, line: Line, destination: Destination, travel_date: date) ->
         if version is None or mapping is None:
             status = messages.TARIFF_MAPPING_PENDING
         else:
-            entry = register.single_resolved(register.matching_entries(
-                version, destination, travel_date, plan_sku=mapping.plan_sku, plan_version=mapping.plan_version,
+            entry = register.single_resolved(register.line_entries(
+                version, destination, travel_date,
+                plan_sku=mapping.plan_sku, plan_version=mapping.plan_version, term=line.term,
             ))
             if entry is None:
                 status = messages.TARIFF_MAPPING_PENDING
@@ -191,6 +203,8 @@ def line_quote(user, line: Line, destination: Destination, travel_date: date) ->
             elif entry.supplier_availability == RegisterEntry.Availability.NOT_AVAILABLE:
                 outcome = messages.NOT_SUPPORTED
             elif entry.supplier_availability == RegisterEntry.Availability.UNKNOWN:
+                status = messages.TARIFF_MAPPING_PENDING
+            elif not _charging_basis_known(entry):
                 status = messages.TARIFF_MAPPING_PENDING
             elif entry.inclusion == RegisterEntry.Inclusion.INCLUDED:
                 outcome = messages.INCLUDED_WITH_LIMIT
@@ -250,7 +264,9 @@ def public_quote(destination: Destination, travel_date: date) -> QuoteResult:
     entry = None
     if version is not None:
         entry = register.single_resolved(register.matching_entries(version, destination, travel_date))
-    if entry is not None and (register.is_stale(entry) or not _has_any_rate(entry)):
+    if entry is not None and (
+        register.is_stale(entry) or not _has_any_rate(entry) or not _charging_basis_known(entry)
+    ):
         entry = None
 
     data = {

@@ -49,7 +49,7 @@ class LineQuoteTests(TestCase):
         self.assertEqual(data["entitlement"]["data_mb"], 5120)
         self.assertEqual(data["rates"]["data"]["display"], "£0.0160 per MB")
         self.assertIsNone(data["rates"]["mms"])  # unknown, not £0
-        self.assertEqual(data["charging"]["spend_control"], "£45 data-roaming limit")
+        self.assertEqual(data["charging"]["spend_control"], "Customer-set bill limit applies")
         self.assertEqual(data["destination"]["rating_zone"], "Zone 2")
 
     def test_remaining_balance_is_coming_soon_never_zero(self):

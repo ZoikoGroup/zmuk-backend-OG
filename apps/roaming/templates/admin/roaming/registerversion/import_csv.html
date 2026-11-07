@@ -2,14 +2,23 @@
 {% load i18n %}
 {% block content %}
   <h1>{{ title }}</h1>
-  <p>Upload the destination-and-plan register exported by Product/Operations (<code>*.csv</code>, comma or
-     semicolon delimited, UTF-8). The import creates a <strong>draft</strong>; nothing changes for customers
-     until you activate it from the list.</p>
+  <p>Upload the reconciled destination-and-plan register (<code>*.csv</code>, UTF-8, comma or semicolon
+     delimited, header exactly as the agreed 28-column template). The import creates a <strong>draft</strong>;
+     nothing changes for customers until you activate it from the list.</p>
   <p>Required columns: <code>{{ required_columns|join:", " }}</code>.<br>
      All columns: <code>{{ columns|join:", " }}</code>.</p>
-  <p>Leave <code>plan_sku</code> blank for a destination's published general rates.
-     <code>included_voice_minutes</code> and <code>included_sms</code> accept <code>unlimited</code>.
-     Rows that can't be trusted are kept as <em>unresolved</em> and never used in quotes.</p>
+  <ul>
+    <li><strong>Blank means unknown</strong> — never zero, GBP, included or allowed. Without a VAT basis, currency
+        and rounding rule no price is shown to customers.</li>
+    <li>Rates are plain decimals with at most 4 decimal places and no currency symbol (e.g. <code>0.0160</code>).
+        <code>0</code> means free and must be evidenced.</li>
+    <li>Leave <code>plan_sku</code> blank only for approved published general rates.
+        <code>included_voice_minutes</code> and <code>included_sms</code> accept <code>unlimited</code>.</li>
+    <li>Example rows (<code>EXAMPLE-*</code> SKUs or sample source IDs) and overlapping effective windows are
+        rejected.</li>
+    <li>Rejected rows are kept as <em>unresolved</em>, never used in quotes, and listed in the downloadable
+        rejection report (row, source key, field, rule, owner).</li>
+  </ul>
   <form method="post" enctype="multipart/form-data">
     {% csrf_token %}
     <table>{{ form.as_table }}</table>

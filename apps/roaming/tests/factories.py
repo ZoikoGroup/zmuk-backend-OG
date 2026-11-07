@@ -32,8 +32,8 @@ def included_row(code: str, **extra) -> dict:
         "supplier_availability": "available", "inclusion": "included",
         "included_data_mb": "5120", "included_voice_minutes": "500", "included_sms": "500",
         "rate_data_per_mb": "0.0160", "rate_voice_to_uk_per_min": "0.065", "rate_sms": "0.10",
-        "vat_basis": "inclusive", "exhaustion_action": "charge",
-        "applicable_spend_control": "£45 data-roaming limit", **extra,
+        "rate_units_rounding": "Data per KB", "vat_basis": "inclusive", "currency": "GBP",
+        "exhaustion_action": "charge", "applicable_spend_control": "Customer-set bill limit applies", **extra,
     }
 
 
@@ -42,9 +42,22 @@ def charged_row(code: str, **extra) -> dict:
         "plan_sku": "STD10", "plan_version": "v1", "territory_code": code, "rating_zone": "Zone 3",
         "supplier_availability": "available", "inclusion": "not_included",
         "rate_data_per_mb": "0.1500", "rate_voice_to_uk_per_min": "0.250",
-        "rate_voice_incoming_per_min": "0.150", "rate_sms": "0.10", "vat_basis": "inclusive",
-        "exhaustion_action": "charge", **extra,
+        "rate_voice_incoming_per_min": "0.150", "rate_sms": "0.10", "rate_units_rounding": "Data per KB",
+        "vat_basis": "inclusive", "currency": "GBP", "exhaustion_action": "charge", **extra,
     }
+
+
+def mapping_csv(rows: list[dict]) -> bytes:
+    """A plan-mapping file with the agreed 7-column header."""
+    from apps.roaming.services.plan_mapping import COLUMNS
+
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=COLUMNS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({"term": "30D", "plan_sku": "STD10", "plan_version": "v1", "effective_from": "2025-01-01",
+                         **row})
+    return out.getvalue().encode("utf-8")
 
 
 def load_register(rows: list[dict], *, label="test-r1", validation_date=None, activate=True):

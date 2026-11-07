@@ -72,7 +72,7 @@ def outcome_message(outcome: str, *, country: str, plan: str, allowance: str) ->
 
 
 def public_message(country: str) -> str:
-    return f"{PUBLIC_NOTICE}. These are our published roaming rates for {country}."
+    return f"{PUBLIC_NOTICE}. These are our general published roaming rates for {country}. Your plan may differ."
 
 
 def action(key: str) -> dict:

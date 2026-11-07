@@ -37,7 +37,7 @@ def plan_mapping(line) -> PlanTariffMap | None:
 
 
 def matching_entries(version: RegisterVersion, destination: Destination, travel_date: date, *,
-                     plan_sku: str = "", plan_version: str = "") -> list[RegisterEntry]:
+                     plan_sku: str = "", plan_version: str = "", contract_duration: str = "") -> list[RegisterEntry]:
     """Every row for this plan (blank SKU = published rates) and destination on `travel_date`.
 
     The caller treats anything other than exactly one resolved row as
@@ -47,9 +47,25 @@ def matching_entries(version: RegisterVersion, destination: Destination, travel_
     return list(
         RegisterEntry.objects.filter(
             version=version, destination=destination, plan_sku=plan_sku, plan_version=plan_version,
-            effective_from__lte=travel_date,
+            contract_duration=contract_duration, effective_from__lte=travel_date,
         ).filter(Q(effective_to__isnull=True) | Q(effective_to__gte=travel_date))
     )
+
+
+def line_entries(version: RegisterVersion, destination: Destination, travel_date: date, *,
+                 plan_sku: str, plan_version: str, term: str) -> list[RegisterEntry]:
+    """Rows for a line's tariff, honouring its contract term (Decision v2 A05).
+
+    Rows for the line's own term (30D/12M/24M) win; rows with a blank
+    `contract_duration` (stated to apply to every term) are used only when
+    there is no row for that term. A 12M row is never used for a 30D line.
+    """
+    lookup = dict(plan_sku=plan_sku, plan_version=plan_version)
+    if term:
+        exact = matching_entries(version, destination, travel_date, contract_duration=term, **lookup)
+        if exact:
+            return exact
+    return matching_entries(version, destination, travel_date, **lookup)
 
 
 def single_resolved(entries: list[RegisterEntry]) -> RegisterEntry | None:
