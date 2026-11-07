@@ -12,10 +12,15 @@
 
 Failures are recorded on the order (`errors`, status FAILED) and retried by
 `retry_add_line_fulfilment`, up to MAX_ATTEMPTS, after which support takes over.
+
+While ADD_LINE_SUPPLIER_WRITES_ENABLED is off, steps 1–2 still run but the
+activation is held back (not counted as a failed attempt); the retry job sends
+it once the switch is turned on.
 """
 
 import logging
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -204,6 +209,10 @@ def _fulfil_locked(order: AddLineOrder) -> AddLineOrder:
             line = _ensure_line(order, sim)
 
             step = "activation"
+            if sim.inventory != Sim.Inventory.ACTIVATED and not settings.ADD_LINE_SUPPLIER_WRITES_ENABLED:
+                logger.warning("Activation held for %s: ADD_LINE_SUPPLIER_WRITES_ENABLED is off",
+                               order.order_reference)
+                return order
             service = get_service()
             if sim.inventory == Sim.Inventory.ACTIVATED:
                 # Already sent on an earlier attempt: only check where it got to.

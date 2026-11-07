@@ -8,10 +8,12 @@
   backwards (events can arrive late, twice or out of order).
 * A failed or invalid code never touches the new line: it keeps working and
   the customer can submit a new code.
+* Nothing is sent while ADD_LINE_SUPPLIER_WRITES_ENABLED is off.
 """
 
 import logging
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -91,6 +93,10 @@ def submit(port: PortRequest) -> PortRequest:
         port = PortRequest.objects.select_for_update().get(pk=port.pk)
         line = port.line
         if port.status != S.AWAITING_ACTIVATION or line.status != Line.Status.ACTIVE or not line.sim:
+            return port
+        if not settings.ADD_LINE_SUPPLIER_WRITES_ENABLED:
+            # Code stays encrypted and waiting; reconcile_port_requests sends it later.
+            logger.warning("Port-in held for line %s: ADD_LINE_SUPPLIER_WRITES_ENABLED is off", line.uuid)
             return port
         if not port.encrypted_code:
             # Purged before the line went live (code older than its 30-day life).

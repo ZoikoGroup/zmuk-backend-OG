@@ -1,0 +1,6 @@
+# Known false positives (gitleaks fingerprints: <commit>:<file>:<rule>:<line>).
+# Each entry must say why it is safe.
+
+# Fake Stripe webhook secret in a unit test (construct_event is mocked); never a real key.
+# Replaced by a runtime-generated value in a later commit.
+0185dff1a8c25f1a358ff55206fcdbbe3eca3f55:apps/add_line/tests/test_checkout.py:generic-api-key:25

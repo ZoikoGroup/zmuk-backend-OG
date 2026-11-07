@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
+from secrets import token_hex
 from types import SimpleNamespace
 from unittest import mock
 
@@ -22,13 +23,15 @@ from apps.sims.transatel import TransatelAPIError
 CHECKOUT_URL = "/api/v1/lines/checkout/"
 SETTINGS = dict(
     STRIPE_SECRET_KEY="sk_test_x",
-    STRIPE_ADD_LINE_WEBHOOK_SECRET="whsec_x",
+    # Random per run: construct_event is mocked, the value only has to pass usable_secret().
+    STRIPE_ADD_LINE_WEBHOOK_SECRET=f"whsec_{token_hex(16)}",
     MAX_CONSUMER_LINES=5,
     LINE_HOLD_MINUTES=30,
     ADD_LINE_REAUTH_MINUTES=60,
     ADD_LINE_QUOTE_MINUTES=30,
     ADD_LINE_CONTRACT_VERSION="v1",
     ADD_LINE_CONTRACT_SUMMARY_VERSION="s1",
+    ADD_LINE_SUPPLIER_WRITES_ENABLED=True,
 )
 
 
@@ -46,6 +49,7 @@ def fake_intent(order, status="succeeded", **overrides):
         "amount": int(order.total_gross * 100),
         "amount_received": int(order.total_gross * 100),
         "currency": "gbp",
+        "livemode": False,
         "metadata": {"add_line_order": order.order_reference, "source": "zoiko_add_line"},
         **overrides,
     }
@@ -281,6 +285,37 @@ class PaymentAndFulfilmentTests(CheckoutTestCase):
         self.assertEqual(order.fulfilment_status, AddLineOrder.FulfilmentStatus.ACTIVATED)
         self.assertEqual(order.line.status, Line.Status.ACTIVE)
 
+    @override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=False)
+    def test_supplier_writes_off_holds_activation(self):
+        _, order = self.checkout()
+        order, service = self.pay(order)
+        service.activate_order_sim.assert_not_called()
+        self.assertEqual(order.payment_status, AddLineOrder.PaymentStatus.PAID)
+        self.assertEqual(order.fulfilment_status, AddLineOrder.FulfilmentStatus.SIM_RESERVED)
+        self.assertEqual(order.line.status, Line.Status.PENDING_ACTIVATION)
+        self.assertEqual(order.errors, [])  # held, not failed
+
+        later = fake_service()
+        with override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=True), \
+                mock.patch("apps.add_line.services.fulfilment.get_service", return_value=later):
+            call_command("retry_add_line_fulfilment", stdout=StringIO())
+        later.activate_order_sim.assert_called_once()
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, AddLineOrder.FulfilmentStatus.ACTIVATED)
+
+    def test_live_payment_rejected_on_test_keys(self):
+        _, order = self.checkout()
+        with self.assertRaises(payments.PaymentMismatch):
+            payments.handle_payment_succeeded(order, fake_intent(order, livemode=True))
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, AddLineOrder.PaymentStatus.PENDING)
+
+    def test_unexpected_fulfilment_error_keeps_order_paid(self):
+        _, order = self.checkout()
+        with mock.patch("apps.add_line.services.fulfilment._fulfil_locked", side_effect=RuntimeError("bug")):
+            order = payments.handle_payment_succeeded(order, fake_intent(order))
+        self.assertEqual(order.payment_status, AddLineOrder.PaymentStatus.PAID)
+
     def test_lapsed_sim_reservation_is_replaced(self):
         _, order = self.checkout()
         SimReservation.objects.all().delete()
@@ -312,6 +347,17 @@ class ConfirmAndWebhookTests(CheckoutTestCase):
         resp = self.confirm(order, status="requires_payment_method")
         self.assertEqual(resp.status_code, 402)
 
+    def test_confirm_records_decline(self):
+        _, order = self.checkout()
+        intent = fake_intent(order, status="requires_payment_method",
+                             last_payment_error={"code": "card_declined", "decline_code": "insufficient_funds",
+                                                 "message": "Your card has insufficient funds."})
+        with mock.patch("apps.add_line.views.stripe.PaymentIntent.retrieve", return_value=intent):
+            resp = self.client.post(f"/api/v1/lines/orders/{order.order_reference}/confirm/")
+        self.assertEqual(resp.status_code, 402)
+        body = self.client.get(f"/api/v1/lines/orders/{order.order_reference}/").json()
+        self.assertEqual(body["payment_error"]["code"], "insufficient_funds")
+
     def test_other_customers_order_is_hidden(self):
         _, order = self.checkout()
         bob = User.objects.create_user("bob", "bob@example.com", "pw")
@@ -325,11 +371,62 @@ class ConfirmAndWebhookTests(CheckoutTestCase):
         self.assertEqual(body["message"], "Waiting for payment.")
         self.assertIsNone(body["line"])
 
-    def webhook(self, event):
+    def webhook(self, event, content_type="application/json"):
+        event = {"id": "evt_1", "livemode": False, **event}
         with mock.patch("apps.add_line.views.stripe.Webhook.construct_event", return_value=event), \
                 mock.patch("apps.add_line.services.fulfilment.get_service", return_value=fake_service()):
             return APIClient().post("/api/v1/lines/webhooks/stripe/", b"{}",
-                                    content_type="application/json", HTTP_STRIPE_SIGNATURE="t=1")
+                                    content_type=content_type, HTTP_STRIPE_SIGNATURE="t=1")
+
+    def test_webhook_ignores_other_mode(self):
+        _, order = self.checkout()
+        resp = self.webhook({"type": "payment_intent.succeeded", "livemode": True,
+                             "data": {"object": fake_intent(order)}})
+        self.assertEqual(resp.json()["ignored"], "wrong mode")
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, AddLineOrder.PaymentStatus.PENDING)
+
+    def test_webhook_retries_when_paid_state_not_saved(self):
+        _, order = self.checkout()
+        with mock.patch("apps.add_line.services.payments.capacity.mark_paid", side_effect=RuntimeError("db")):
+            resp = self.webhook({"type": "payment_intent.succeeded", "data": {"object": fake_intent(order)}})
+        self.assertEqual(resp.status_code, 500)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, AddLineOrder.PaymentStatus.PENDING)
+
+    def test_webhook_mismatch_is_acknowledged(self):
+        _, order = self.checkout()
+        resp = self.webhook({"type": "payment_intent.succeeded",
+                             "data": {"object": fake_intent(order, amount=1, amount_received=1)}})
+        self.assertEqual((resp.status_code, resp.json()["ignored"]), (200, "mismatch"))
+
+    def test_webhook_payment_failed_keeps_order_open(self):
+        _, order = self.checkout()
+        failed = fake_intent(order, status="requires_payment_method",
+                             last_payment_error={"code": "card_declined", "message": "Your card was declined.",
+                                                 "payment_method": {"card": {"last4": "0002"}}})
+        self.assertEqual(self.webhook({"type": "payment_intent.payment_failed",
+                                       "data": {"object": failed}}).status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.last_payment_error, {"code": "card_declined", "message": "Your card was declined."})
+        self.assertEqual(order.payment_status, AddLineOrder.PaymentStatus.PENDING)
+        self.assertEqual(order.hold.status, CapacityHold.Status.HELD)
+        body = self.client.get(f"/api/v1/lines/orders/{order.order_reference}/").json()
+        self.assertEqual(body["payment_error"]["code"], "card_declined")
+        self.assertIn("try again", body["message"])
+
+        self.webhook({"type": "payment_intent.succeeded", "data": {"object": fake_intent(order)}})
+        body = self.client.get(f"/api/v1/lines/orders/{order.order_reference}/").json()
+        self.assertEqual(body["payment_status"], "paid")
+        self.assertIsNone(body["payment_error"])
+
+    def test_webhook_rejects_wrong_content_type(self):
+        self.assertEqual(self.webhook({"type": "x"}, content_type="text/plain").status_code, 415)
+
+    @override_settings(DEBUG=False, STRIPE_ADD_LINE_WEBHOOK_SECRET="whsec_xxxxxxxxxxxx")
+    def test_webhook_placeholder_secret_refuses(self):
+        resp = APIClient().post("/api/v1/lines/webhooks/stripe/", b"{}", content_type="application/json")
+        self.assertEqual(resp.status_code, 503)
 
     def test_webhook_marks_paid(self):
         _, order = self.checkout()

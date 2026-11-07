@@ -90,6 +90,7 @@ INSTALLED_APPS = [
     "apps.support",
     "apps.sims",
     "apps.add_line",
+    "apps.roaming",
 
     # Third-party apps
     "django_ckeditor_5",
@@ -446,11 +447,24 @@ ADD_LINE_CLAIM_AUTO_APPROVE = os.getenv("ADD_LINE_CLAIM_AUTO_APPROVE", "True") =
 # In-flight transfers with no update for this long are reported for support.
 PORT_STALE_HOURS = int(os.getenv("PORT_STALE_HOURS", "48"))
 
+# Master switch for add-line calls that change things on Transatel (SIM
+# activation, PAC/STAC submission). OFF by default: staging must never activate
+# real SIMs or move real numbers. Turn on only with written release approval.
+ADD_LINE_SUPPLIER_WRITES_ENABLED = os.getenv("ADD_LINE_SUPPLIER_WRITES_ENABLED", "False") == "True"
+
 # Shared secret for X-TSL-Signature-256 on Transatel webhooks.
 TRANSATEL_WEBHOOK_SECRET = os.getenv("TRANSATEL_WEBHOOK_SECRET", "")
 
 # Signing secret for the add-line Stripe webhook endpoint.
 STRIPE_ADD_LINE_WEBHOOK_SECRET = os.getenv("STRIPE_ADD_LINE_WEBHOOK_SECRET")
+
+# =============================================================================
+# ROAMING & TRAVEL (apps.roaming)
+# =============================================================================
+
+# A register row last validated longer ago than this gives STALE instead of a
+# personalised quote (ROAM-005 §04, CT-001 §09-5).
+ROAMING_REGISTER_STALE_DAYS = int(os.getenv("ROAMING_REGISTER_STALE_DAYS", "90"))
 
 # =============================================================================
 # EMAIL / SMTP

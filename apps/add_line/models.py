@@ -225,6 +225,10 @@ class AddLineOrder(models.Model):
     )
     stripe_payment_intent_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+    # Latest declined attempt (Stripe code + customer-safe message, no card data).
+    # The order stays open so the customer can retry.
+    last_payment_error = models.JSONField(null=True, blank=True)
+    payment_failed_at = models.DateTimeField(null=True, blank=True)
 
     # ── Fulfilment ──
     fulfilment_status = models.CharField(

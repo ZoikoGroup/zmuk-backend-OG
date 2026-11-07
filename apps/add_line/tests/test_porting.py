@@ -21,7 +21,7 @@ from apps.sims.models import Sim
 from apps.sims.transatel import TransatelAPIError
 
 KEY = Fernet.generate_key().decode()
-SECRET = "whsec_transatel"
+SECRET = "tsl-stream-test-7d3e91a0c4b2"
 S = PortRequest.Status
 
 
@@ -66,7 +66,7 @@ class PacFormatTests(TestCase):
 
 
 @override_settings(PAC_ENCRYPTION_KEY=KEY, TRANSATEL_WEBHOOK_SECRET=SECRET, PAC_RETENTION_DAYS=7,
-                   PORT_STALE_HOURS=48)
+                   PORT_STALE_HOURS=48, ADD_LINE_SUPPLIER_WRITES_ENABLED=True)
 class PortingTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("alice", "alice@example.com", "pw")
@@ -151,6 +151,20 @@ class CreateAndSubmitTests(PortingTestCase):
         self.assertEqual(port.status, S.PENDING)
         self.assertIsNone(port.last_error)
 
+    @override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=False)
+    def test_supplier_writes_off_holds_transfer(self):
+        line = self.make_line()
+        port, service = self.request(line)
+        service.request_uk_port_in.assert_not_called()
+        self.assertEqual(port.status, S.AWAITING_ACTIVATION)
+        self.assertNotEqual(port.encrypted_code, "")
+
+        with override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=True), \
+                mock.patch("apps.add_line.services.porting.get_service", return_value=port_service()):
+            call_command("reconcile_port_requests", stdout=StringIO())
+        port.refresh_from_db()
+        self.assertEqual(port.status, S.PENDING)
+
     def test_line_activation_sends_waiting_transfer(self):
         line = self.make_line(status=Line.Status.PENDING_ACTIVATION)
         port, _ = self.request(line)
@@ -203,6 +217,10 @@ class StatusTests(PortingTestCase):
         self.assertEqual(new_port.status, S.PENDING)
 
 
+PORT_IN = "CONNECTIVITY-MANAGEMENT/PORTABILITY/UK/PORT_IN/"
+SWITCH_IN = "CONNECTIVITY-MANAGEMENT/PORTABILITY/UK/SWITCH_IN/"
+
+
 class WebhookTests(PortingTestCase):
     URL = "/api/v1/lines/webhooks/transatel/"
 
@@ -211,14 +229,70 @@ class WebhookTests(PortingTestCase):
         self.line = self.make_line()
         self.port, _ = self.request(self.line)
 
-    def post(self, payload, signature=None):
+    def post(self, payload, signature=None, content_type="application/json"):
         body = json.dumps(payload).encode()
-        return APIClient().post(self.URL, body, content_type="application/json",
+        return APIClient().post(self.URL, body, content_type=content_type,
                                 HTTP_X_TSL_SIGNATURE_256=signature if signature is not None else sign(body))
 
-    def event(self, event_id="evt-1", event_type="CONNECTIVITY-MANAGEMENT/PORT_IN/VALIDATED", **body):
+    def event(self, event_id="evt-1", event_type=PORT_IN + "VALIDATED", **body):
         return {"header": {"eventId": event_id, "eventType": event_type, "eventDate": "2026-11-03T10:00:00Z"},
                 "body": {"transactionId": "tx-port-1", **body}}
+
+    def test_every_catalogue_port_in_event_maps(self):
+        for i, (suffix, expected) in enumerate((
+            ("ATTACH/REQUESTED", S.ATTACH_REQUESTED), ("ATTACH/RECEIVED", S.ATTACH_RECEIVED),
+            ("VALIDATED", S.VALIDATED), ("DONE", S.DONE),
+        )):
+            self.post(self.event(f"e{i}", PORT_IN + suffix, simSerial="SER1"))
+            self.port.refresh_from_db()
+            self.assertEqual(self.port.status, expected, suffix)
+
+    def test_terminal_catalogue_events(self):
+        for suffix, expected in (("INVALIDATED", S.INVALIDATED), ("CANCELED", S.CANCELED),
+                                 ("ATTACH/FAILED", S.ATTACH_FAILED)):
+            PortRequest.objects.filter(pk=self.port.pk).update(status=S.PENDING)
+            self.post(self.event(f"t-{suffix}", PORT_IN + suffix))
+            self.port.refresh_from_db()
+            self.assertEqual(self.port.status, expected, suffix)
+
+    def test_switch_in_events_apply_to_stac_only(self):
+        self.post(self.event("s1", SWITCH_IN + "VALIDATED"))
+        self.assertIn("does not match", SupplierEvent.objects.get(event_id="s1").error)
+        self.port.refresh_from_db()
+        self.assertEqual(self.port.status, S.PENDING)
+
+        PortRequest.objects.filter(pk=self.port.pk).update(code_type=PortRequest.CodeType.STAC)
+        self.post(self.event("s2", SWITCH_IN + "VALIDATED"))
+        self.port.refresh_from_db()
+        self.assertEqual(self.port.status, S.VALIDATED)
+
+    def test_sim_serial_mismatch_quarantined(self):
+        self.post(self.event(simSerial="SOMEONE-ELSE"))
+        event = SupplierEvent.objects.get()
+        self.assertEqual((event.status, event.error),
+                         (SupplierEvent.Status.IGNORED, "simSerial does not match the request's SIM"))
+        self.port.refresh_from_db()
+        self.assertEqual(self.port.status, S.PENDING)
+
+    def test_unknown_event_type_stored_not_applied(self):
+        for i, event_type in enumerate((PORT_IN + "LOCKED", "CONNECTIVITY-MANAGEMENT/PORT_IN/VALIDATED")):
+            self.assertEqual(self.post(self.event(f"u{i}", event_type)).status_code, 204)
+        self.assertEqual(set(SupplierEvent.objects.values_list("status", flat=True)),
+                         {SupplierEvent.Status.IGNORED})
+        self.port.refresh_from_db()
+        self.assertEqual(self.port.status, S.PENDING)
+
+    def test_wrong_content_type_rejected(self):
+        self.assertEqual(self.post(self.event(), content_type="text/plain").status_code, 415)
+        self.assertFalse(SupplierEvent.objects.exists())
+
+    def test_oversized_body_rejected(self):
+        self.assertEqual(self.post(self.event(padding="x" * 70_000)).status_code, 413)
+        self.assertFalse(SupplierEvent.objects.exists())
+
+    @override_settings(DEBUG=False, TRANSATEL_WEBHOOK_SECRET="changeme-please-123")
+    def test_placeholder_secret_refuses(self):
+        self.assertEqual(self.post(self.event()).status_code, 503)
 
     def test_valid_event_applied(self):
         resp = self.post(self.event(portabilityDate="2026-11-20"))
@@ -250,8 +324,8 @@ class WebhookTests(PortingTestCase):
         self.assertEqual(SupplierEvent.objects.get().status, SupplierEvent.Status.IGNORED)
 
     def test_out_of_order_event_ignored(self):
-        self.post(self.event("e1", "CONNECTIVITY-MANAGEMENT/PORT_IN/LOCKED"))
-        self.post(self.event("e2", "CONNECTIVITY-MANAGEMENT/PORT_IN/VALIDATED"))
+        porting.apply_status(self.port, "LOCKED", source="poll")  # LOCKED is polled; no event exists
+        self.post(self.event("e2", PORT_IN + "VALIDATED"))
         self.port.refresh_from_db()
         self.assertEqual(self.port.status, S.LOCKED)
 
