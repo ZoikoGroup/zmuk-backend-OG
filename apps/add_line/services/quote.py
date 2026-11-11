@@ -117,11 +117,11 @@ def _monthly_price(plan: Plan, term: str) -> Decimal:
     return Decimal(price if price is not None else plan.price).quantize(_PENNY)
 
 
-def _resolve_coupon(code: str, user, plan: Plan, amount: Decimal):
+def _resolve_coupon(code: str, user, plan: Plan, amount: Decimal, additional_line: bool = True):
     coupon = Coupon.objects.filter(Q(slug__iexact=code) | Q(name__iexact=code)).first()
     if not coupon:
         raise QuoteError("PROMO_NOT_FOUND", "We couldn't find that promo code.")
-    if not coupon.valid_for_additional_lines:
+    if additional_line and not coupon.valid_for_additional_lines:
         raise QuoteError("PROMO_NOT_ELIGIBLE", "This promo code can't be used for an additional line.")
     valid, message, discount = validate_coupon(coupon, user, amount, plan)
     if not valid:
@@ -129,7 +129,13 @@ def _resolve_coupon(code: str, user, plan: Plan, amount: Decimal):
     return coupon, Decimal(str(discount)).quantize(_PENNY)
 
 
-def build_quote(user, plan_id, term: str, sim_type: str, promo_code: str = "") -> Quote:
+def build_quote(user, plan_id, term: str, sim_type: str, promo_code: str = "",
+                *, additional_line: bool = True) -> Quote:
+    """Price one line. `user` may be None for a guest preview (Switch & Save).
+
+    `additional_line=False` is for a new customer's first line, where the
+    "valid for additional lines" coupon restriction (A3) doesn't apply.
+    """
     if term not in Term.values:
         raise QuoteError("TERM_INVALID", "Choose 30 days, 12 months or 24 months.")
     if sim_type not in SimType.values:
@@ -143,7 +149,7 @@ def build_quote(user, plan_id, term: str, sim_type: str, promo_code: str = "") -
     monthly = _monthly_price(plan, term)
     coupon, discount = None, Decimal("0.00")
     if promo_code:
-        coupon, discount = _resolve_coupon(promo_code.strip(), user, plan, monthly)
+        coupon, discount = _resolve_coupon(promo_code.strip(), user, plan, monthly, additional_line)
 
     return Quote(
         plan=plan, term=term, sim_type=sim_type, coupon=coupon,

@@ -27,6 +27,10 @@
 
               <!-- Customer details -->
               <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px;">
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;width:40%;border-bottom:1px solid #e9ecef;">Reference</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ reference }}</td>
+                </tr>
                 <tr style="background:#f8f9fa;">
                   <td style="padding:10px 14px;font-weight:700;color:#0e1929;width:40%;border-bottom:1px solid #e9ecef;">Name</td>
                   <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ first_name }} {{ last_name }}</td>
@@ -57,7 +61,15 @@
                 </tr>
                 <tr>
                   <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Selected Plan</td>
-                  <td style="padding:10px 14px;font-weight:700;color:#e6007e;border-bottom:1px solid #e9ecef;">{{ selected_plan }}</td>
+                  <td style="padding:10px 14px;font-weight:700;color:#e6007e;border-bottom:1px solid #e9ecef;">{{ selected_plan }}{% if contract_term %} · {{ contract_term }}{% endif %}{% if sim_type %} · {{ sim_type }}{% endif %}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Switch Option</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ switch_route|default:"Not provided" }} · code: {{ code_status }}</td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Promo Code</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ promo_code|default:"None" }}</td>
                 </tr>
                 <tr style="background:#f8f9fa;">
                   <td style="padding:10px 14px;font-weight:700;color:#0e1929;">Submitted</td>
