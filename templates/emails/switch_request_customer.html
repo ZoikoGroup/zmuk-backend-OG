@@ -31,12 +31,19 @@
 
               <!-- Summary box -->
               <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:8px;padding:20px;margin-bottom:24px;">
-                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Plan selected:</strong> {{ selected_plan }}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Your reference:</strong> {{ reference }}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Plan selected:</strong> {{ selected_plan }}{% if contract_term %} ({{ contract_term }}{% if sim_type %}, {{ sim_type }}{% endif %}){% endif %}</td></tr>
                 <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Mobile number:</strong> {{ mobile }}</td></tr>
                 {% if current_provider %}
                 <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Switching from:</strong> {{ current_provider }}</td></tr>
                 {% endif %}
+                {% if switch_route %}
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Switch option:</strong> {{ switch_route }}</td></tr>
+                {% endif %}
               </table>
+              <p style="margin:0 0 24px;color:#444;font-size:14px;line-height:1.6;">
+                Keep your reference <strong>{{ reference }}</strong>. You'll need it, with this email address, to track your switch.
+              </p>
 
               <p style="margin:0 0 12px;color:#444;font-size:15px;line-height:1.6;">
                 <strong>What happens next?</strong>
