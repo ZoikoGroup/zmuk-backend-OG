@@ -21,19 +21,19 @@
           <!-- Body -->
           <tr>
             <td style="padding:40px 40px 24px;">
-              <h2 style="margin:0 0 16px;color:#0e1929;font-size:22px;font-weight:700;">Your switch request is confirmed 🎉</h2>
+              <h2 style="margin:0 0 16px;color:#0e1929;font-size:22px;font-weight:700;">Switch request received</h2>
               <p style="margin:0 0 12px;color:#444;font-size:15px;line-height:1.6;">
                 Hi {{ first_name }},
               </p>
               <p style="margin:0 0 24px;color:#444;font-size:15px;line-height:1.6;">
-                Thanks for choosing to switch to Zoiko Mobile! We've received your request and our team will process it within <strong>1 working day</strong>.
+                Thank you. We've received your request. Your reference is <strong>{{ reference }}</strong>. We'll let you know if we need anything else.
               </p>
 
-              <!-- Summary box -->
+              <!-- Summary box (personal details masked) -->
               <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:8px;padding:20px;margin-bottom:24px;">
                 <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Your reference:</strong> {{ reference }}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Plan selected:</strong> {{ selected_plan }}{% if contract_term %} ({{ contract_term }}{% if sim_type %}, {{ sim_type }}{% endif %}){% endif %}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Mobile number:</strong> {{ mobile }}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Plan chosen:</strong> {{ selected_plan }}{% if contract_term %} ({{ contract_term }}{% if sim_type %}, {{ sim_type }}{% endif %}){% endif %}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Mobile number:</strong> {{ mobile_masked }}</td></tr>
                 {% if current_provider %}
                 <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Switching from:</strong> {{ current_provider }}</td></tr>
                 {% endif %}
@@ -41,18 +41,27 @@
                 <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Switch option:</strong> {{ switch_route }}</td></tr>
                 {% endif %}
               </table>
-              <p style="margin:0 0 24px;color:#444;font-size:14px;line-height:1.6;">
-                Keep your reference <strong>{{ reference }}</strong>. You'll need it, with this email address, to track your switch.
+
+              {% if action_needed %}
+              <p style="margin:0 0 24px;padding:14px 16px;background:#fff4e5;border-radius:8px;color:#7a4b00;font-size:14px;line-height:1.6;">
+                <strong>Action needed:</strong> {{ action_needed.message }}
               </p>
+              {% endif %}
 
               <p style="margin:0 0 12px;color:#444;font-size:15px;line-height:1.6;">
                 <strong>What happens next?</strong>
               </p>
-              <ol style="margin:0 0 24px;padding-left:20px;color:#555;font-size:14px;line-height:1.8;">
-                <li>Our team will contact you to collect your PAC or STAC code.</li>
-                <li>We'll submit the switch request to your current provider.</li>
-                <li>Your number will be live on Zoiko Mobile within 1 working day.</li>
-              </ol>
+              <ul style="margin:0 0 24px;padding-left:20px;color:#555;font-size:14px;line-height:1.8;">
+                <li>We're checking your request. Submitting it does not activate a paid plan or complete your number transfer.</li>
+                <li>To complete your new mobile plan, we'll ask you to securely confirm your account, contract and payment arrangements.</li>
+                {% if route_key != "new_keep" %}<li>Your switching date will be confirmed once the required checks and service arrangements are complete.</li>{% endif %}
+              </ul>
+              <p style="margin:0 0 24px;color:#555;font-size:13px;line-height:1.6;">
+                There is no fee to submit your switching request. Your chosen plan may have monthly or other charges, shown before you agree to purchase.
+              </p>
+              <p style="margin:0 0 24px;color:#444;font-size:14px;line-height:1.6;">
+                Keep your reference <strong>{{ reference }}</strong>. You'll need it, with this email address, to track your switch.
+              </p>
 
               <p style="margin:0;color:#888;font-size:13px;line-height:1.6;">
                 Questions? Email us at <a href="mailto:info@zoikomobile.co.uk" style="color:#0e8f74;">info@zoikomobile.co.uk</a> or call <strong>+44 7071 646 399</strong>.
