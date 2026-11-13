@@ -301,6 +301,9 @@ CORS_ALLOW_HEADERS = [
     "x-csrftoken",
     "x-requested-with",
     "x-frontend-origin",
+    # Switch & Save submit (duplicate protection). Without it the browser's
+    # preflight fails and the request never reaches us.
+    "idempotency-key",
 ]
 
 CORS_ALLOW_METHODS = [
@@ -457,6 +460,26 @@ TRANSATEL_WEBHOOK_SECRET = os.getenv("TRANSATEL_WEBHOOK_SECRET", "")
 
 # Signing secret for the add-line Stripe webhook endpoint.
 STRIPE_ADD_LINE_WEBHOOK_SECRET = os.getenv("STRIPE_ADD_LINE_WEBHOOK_SECRET")
+
+# =============================================================================
+# SWITCH & SAVE (apps.switch) — CTO Milestone 04 decision, 12 Nov 2026
+# =============================================================================
+
+# Version of the Step 4 authorisation wording. Bump it whenever the wording
+# changes; a form showing an older version is asked to refresh.
+SWITCH_CONSENT_VERSION = os.getenv("SWITCH_CONSENT_VERSION", "2026-11-12")
+
+# An identical open request within this many minutes is treated as a retry.
+SWITCH_DEDUPE_MINUTES = int(os.getenv("SWITCH_DEDUPE_MINUTES", "10"))
+
+# Milestone 4 request→order conversion (linking orders/lines to requests).
+# OFF until Product, Finance, Legal, Security, QA and Ops sign off (M04 §07).
+SWITCH_ORDER_CONVERSION_ENABLED = os.getenv("SWITCH_ORDER_CONVERSION_ENABLED", "False") == "True"
+
+# purge_switch_codes deletes encrypted PAC/STAC codes only when this is True.
+# OFF until Operations and Legal approve the retention rules (note of 13 Nov
+# 2026). The 30-day code-validity check runs either way.
+SWITCH_CODE_DELETION_ENABLED = os.getenv("SWITCH_CODE_DELETION_ENABLED", "False") == "True"
 
 # =============================================================================
 # ROAMING & TRAVEL (apps.roaming)

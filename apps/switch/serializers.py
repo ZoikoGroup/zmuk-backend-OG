@@ -1,5 +1,6 @@
 import re
 
+from django.conf import settings
 from rest_framework import serializers
 
 from apps.add_line.models import SimType, Term
@@ -21,66 +22,181 @@ _QUOTE_ERROR_FIELD = {
 }
 
 
-class StatusFieldsMixin(serializers.Serializer):
-    """Status block shared by the submit response and the tracking endpoints."""
+def consent_version() -> str:
+    """Version of the Step 4 authorisation wording the customer agrees to."""
+    return settings.SWITCH_CONSENT_VERSION
 
-    status_label = serializers.CharField(source="get_status_display", read_only=True)
-    milestone = serializers.SerializerMethodField()
-    milestones = serializers.SerializerMethodField()
+
+# ── Status views ──────────────────────────────────────────────────────────────
+
+class GuestStatusSerializer(serializers.ModelSerializer):
+    """Reference + email lookup: status only, no personal data (M04 §04)."""
+
+    # Customer-facing: an Operations-only action shows as "validating".
+    status = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    stage = serializers.SerializerMethodField()
+    steps = serializers.SerializerMethodField()
+    action_needed = serializers.SerializerMethodField()
+    next_action = serializers.SerializerMethodField()
     pac_status = serializers.SerializerMethodField()
-    estimated_completion_date = serializers.SerializerMethodField()
+    switch_date = serializers.SerializerMethodField()
+    switch_date_message = serializers.SerializerMethodField()
     history = serializers.SerializerMethodField()
-
-    def _steps(self, obj):
-        cache = self.context.setdefault("_milestones", {})
-        if obj.pk not in cache:
-            cache[obj.pk] = services.milestones(obj)
-        return cache[obj.pk]
-
-    def get_milestone(self, obj):
-        return services.current_milestone(self._steps(obj))
-
-    def get_milestones(self, obj):
-        return self._steps(obj)
-
-    def get_pac_status(self, obj):
-        return services.pac_status(obj)
-
-    def get_estimated_completion_date(self, obj):
-        value = services.estimated_completion_date(obj)
-        return value.isoformat() if value else None
-
-    def get_history(self, obj):
-        return services.history(obj)
-
-
-class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
-    """POST /api/switch-requests/ input and response `data`."""
-
-    current_provider = serializers.CharField(max_length=50, required=False, allow_blank=True)
-    plan_id = serializers.IntegerField(write_only=True)
-    contract_term = serializers.ChoiceField(choices=Term.choices)
-    sim_type = serializers.ChoiceField(choices=SimType.choices)
-    switch_route = serializers.ChoiceField(choices=SwitchRequest.Route.choices)
-    # The number being moved (defaults to `mobile`); echoed back masked only.
-    port_number = serializers.CharField(max_length=24, required=False, allow_blank=True, write_only=True)
-    # Accepted on input only: stored encrypted, never sent back (decision C13).
-    pac_code = serializers.CharField(max_length=20, required=False, allow_blank=True, write_only=True)
-    stac_code = serializers.CharField(max_length=20, required=False, allow_blank=True, write_only=True)
-    promo_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
-    plan = serializers.SerializerMethodField()
-    port_number_masked = serializers.SerializerMethodField()
+    feedback_submitted = serializers.SerializerMethodField()
 
     class Meta:
         model = SwitchRequest
         fields = [
-            "id",
             "reference",
+            "status",
+            "status_label",
+            "stage",
+            "steps",
+            "action_needed",
+            "next_action",
+            "switch_route",
+            "code_type",
+            "pac_status",
+            "switch_date",
+            "switch_date_message",
+            "history",
+            "feedback_submitted",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def _tracker(self, obj):
+        cache = self.context.setdefault("_tracker", {})
+        if obj.pk not in cache:
+            cache[obj.pk] = services.tracker(obj)
+        return cache[obj.pk]
+
+    def get_status(self, obj):
+        return services.customer_status(obj)[0]
+
+    def get_status_label(self, obj):
+        return services.customer_status(obj)[1]
+
+    def get_stage(self, obj):
+        return self._tracker(obj)["stage"]
+
+    def get_steps(self, obj):
+        return self._tracker(obj)["steps"]
+
+    def get_action_needed(self, obj):
+        return services.action_needed(obj)
+
+    def get_next_action(self, obj):
+        return services.next_action(obj)
+
+    def get_pac_status(self, obj):
+        return services.pac_status(obj)
+
+    def get_switch_date(self, obj):
+        value = services.switch_date(obj)
+        return value.isoformat() if value else None
+
+    def get_switch_date_message(self, obj):
+        if obj.status in SwitchRequest.TERMINAL_STATUSES or services.switch_date(obj):
+            return None
+        return services.NO_DATE_MESSAGE
+
+    def get_history(self, obj):
+        return services.history(obj)
+
+    def get_feedback_submitted(self, obj):
+        return hasattr(obj, "feedback")
+
+
+class OwnerStatusSerializer(GuestStatusSerializer):
+    """The signed-in owner (or the submitter, in the submit response)."""
+
+    plan = serializers.SerializerMethodField()
+    port_number_masked = serializers.SerializerMethodField()
+    order_reference = serializers.SerializerMethodField()
+    line_id = serializers.SerializerMethodField()
+
+    class Meta(GuestStatusSerializer.Meta):
+        fields = ["id", "first_name"] + GuestStatusSerializer.Meta.fields + [
+            "plan",
+            "contract_term",
+            "sim_type",
+            "port_number_masked",
+            "pac_later",
+            "order_reference",
+            "line_id",
+        ]
+        read_only_fields = fields
+
+    def get_plan(self, obj):
+        return {"id": obj.plan_id, "name": obj.selected_plan} if obj.selected_plan else None
+
+    def get_port_number_masked(self, obj):
+        return services.mask_number(obj.port_number)
+
+    def get_order_reference(self, obj):
+        return obj.order.order_reference if obj.order_id else None
+
+    def get_line_id(self, obj):
+        return str(obj.line.uuid) if obj.line_id else None
+
+
+class StaffSwitchRequestSerializer(serializers.ModelSerializer):
+    """Staff-only list/detail. The encrypted code is never included."""
+
+    class Meta:
+        model = SwitchRequest
+        exclude = ["encrypted_code"]
+
+
+# ── Submit ────────────────────────────────────────────────────────────────────
+
+class SwitchRequestSerializer(serializers.ModelSerializer):
+    """POST /api/switch-requests/ input. The response uses OwnerStatusSerializer."""
+
+    # Step 3: contact number is optional; the address is required.
+    mobile = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    address_line_1 = serializers.CharField(max_length=255, error_messages={
+        "required": "Enter the first line of your address.",
+        "blank": "Enter the first line of your address.",
+    })
+    address_line_2 = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    town_city = serializers.CharField(max_length=100, error_messages={
+        "required": "Enter your town or city.",
+        "blank": "Enter your town or city.",
+    })
+    postcode = serializers.CharField(max_length=16, error_messages={
+        "required": "Enter your postcode.",
+        "blank": "Enter your postcode.",
+        "max_length": "Enter a valid UK postcode.",
+    })
+    current_provider = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    plan_id = serializers.IntegerField()
+    contract_term = serializers.ChoiceField(choices=Term.choices)
+    sim_type = serializers.ChoiceField(choices=SimType.choices)
+    switch_route = serializers.ChoiceField(choices=SwitchRequest.Route.choices)
+    # The number being moved (defaults to `mobile`).
+    port_number = serializers.CharField(max_length=24, required=False, allow_blank=True)
+    # Stored encrypted, never sent back (decision C13).
+    pac_code = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    stac_code = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    promo_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    # Version of the authorisation wording shown on the page; must be current.
+    consent_version = serializers.CharField(max_length=32, required=False, allow_blank=True)
+
+    class Meta:
+        model = SwitchRequest
+        fields = [
             # Step 1
             "first_name",
             "last_name",
             "email",
             "mobile",
+            "address_line_1",
+            "address_line_2",
+            "town_city",
             "postcode",
             # Step 2 (optional)
             "current_provider",
@@ -88,45 +204,23 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
             "current_data_allowance",
             # Step 3
             "plan_id",
-            "plan",
-            "selected_plan",
             "contract_term",
             "sim_type",
             "promo_code",
             # Step 4
             "switch_route",
             "port_number",
-            "port_number_masked",
             "pac_code",
             "stac_code",
             "pac_later",
-            "code_type",
             # Consent
             "transfer_authorised",
             "timeline_acknowledged",
             "terms_accepted",
+            "consent_version",
             "opt_in_news",
             "opt_in_texts",
-            # Status (read-only)
-            "status",
-            "status_label",
-            "milestone",
-            "milestones",
-            "pac_status",
-            "estimated_completion_date",
-            "history",
-            "created_at",
-            "updated_at",
         ]
-        read_only_fields = [
-            "id", "reference", "selected_plan", "code_type", "status", "created_at", "updated_at",
-        ]
-
-    def get_plan(self, obj):
-        return {"id": obj.plan_id, "name": obj.selected_plan} if obj.plan_id else None
-
-    def get_port_number_masked(self, obj):
-        return services.mask_number(obj.port_number)
 
     # ── Step 1 validation ─────────────────────────────────────────────────
     def validate_first_name(self, value):
@@ -142,16 +236,16 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
         return value
 
     def validate_mobile(self, value):
-        cleaned = re.sub(r"[\s-]", "", value)
-        if not UK_MOBILE_RE.match(cleaned):
+        cleaned = re.sub(r"[\s-]", "", value or "")
+        if cleaned and not UK_MOBILE_RE.match(cleaned):
             raise serializers.ValidationError("Enter a valid UK mobile number.")
         return cleaned
 
     def validate_postcode(self, value):
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Billing address / postcode is required.")
-        return value
+        try:
+            return services.normalise_postcode(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
 
     # ── Step 2 validation (optional, but if given must be sensible) ────────
     def validate_current_provider(self, value):
@@ -174,7 +268,7 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
     def validate_transfer_authorised(self, value):
         if not value:
             raise serializers.ValidationError(
-                "You must confirm you are authorised to request this transfer."
+                "You must authorise us to process this switching request."
             )
         return value
 
@@ -189,6 +283,14 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError(
                 "You must agree to the Privacy Policy and Terms & Conditions."
+            )
+        return value
+
+    def validate_consent_version(self, value):
+        value = value.strip()
+        if value and value != consent_version():
+            raise serializers.ValidationError(
+                "The wording on this page has been updated. Please refresh and review it again."
             )
         return value
 
@@ -225,25 +327,28 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
                 f"Enter your {needed}, or choose to provide it later."
             ]
 
-        # The number being moved: given explicitly, else the contact mobile.
-        number = (attrs.get("port_number") or "").strip()
-        if route == SwitchRequest.Route.KEEP_PAC or number:
+        # The number being moved: given explicitly, else the contact number.
+        number = (attrs.get("port_number") or "").strip() or attrs.get("mobile", "")
+        if route == SwitchRequest.Route.KEEP_PAC and not number:
+            errors["port_number"] = ["Enter the mobile number you want to bring to Zoiko."]
+        elif number and route != SwitchRequest.Route.NEW_KEEP:
             try:
-                attrs["port_number"] = services.normalise_msisdn(number or attrs.get("mobile", ""))
+                attrs["port_number"] = services.normalise_msisdn(number)
             except services.PacError as exc:
                 errors["port_number"] = [exc.message]
+        elif route == SwitchRequest.Route.NEW_KEEP:
+            attrs["port_number"] = ""  # nothing moves
 
-        # Plan and promo, validated by the same pricing used at checkout.
+        # Plan and promo, priced the same way as checkout; snapshot kept (G2).
         request = self.context.get("request")
         user = request.user if request and request.user.is_authenticated else None
         promo = (attrs.get("promo_code") or "").strip()
         attrs["promo_code"] = promo
         try:
-            quote = build_quote(
+            attrs["_quote"] = build_quote(
                 user, attrs["plan_id"], attrs["contract_term"], attrs["sim_type"], promo,
                 additional_line=False,
             )
-            attrs["_plan"] = quote.plan
         except QuoteError as exc:
             errors[_QUOTE_ERROR_FIELD.get(exc.code, "promo_code")] = [exc.message]
 
@@ -252,16 +357,33 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        from django.utils import timezone
+
         validated_data.pop("plan_id")
-        plan = validated_data.pop("_plan")
+        validated_data.pop("consent_version", None)
+        quote = validated_data.pop("_quote")
         code = validated_data.pop("_code", None)
         request = self.context.get("request")
+        meta = request.META if request else {}
+        user = request.user if request and request.user.is_authenticated else None
 
         instance = SwitchRequest(
             **validated_data,
-            plan=plan,
-            selected_plan=plan.name,
-            user=request.user if request and request.user.is_authenticated else None,
+            plan=quote.plan,
+            selected_plan=quote.plan.name,
+            quote_snapshot={
+                "quote": quote.as_dict(),
+                "contract_version": settings.ADD_LINE_CONTRACT_VERSION,
+                "contract_summary_version": settings.ADD_LINE_CONTRACT_SUMMARY_VERSION,
+            },
+            quote_hash=quote.hash,
+            consent_version=consent_version(),
+            consented_at=timezone.now(),
+            consent_ip=meta.get("REMOTE_ADDR") or None,
+            consent_user_agent=(meta.get("HTTP_USER_AGENT") or "")[:255],
+            user=user,
+            existing_account_email=user is None and services.email_has_account(validated_data["email"]),
+            idempotency_key=self.context.get("idempotency_key"),
         )
         if code:
             # Raises CodeStorageUnavailable before anything is saved.
@@ -269,61 +391,13 @@ class SwitchRequestSerializer(StatusFieldsMixin, serializers.ModelSerializer):
         instance.save()
         if code:
             services.record_code_received(instance)
+        # Automated intake checks (M04 stage 2).
+        status, reason = services.initial_status(instance)
+        instance.set_status(status, reason=reason)
         return instance
 
 
-class SwitchStatusSerializer(StatusFieldsMixin, serializers.ModelSerializer):
-    """Tracking view: no personal data beyond the first name and a masked number."""
-
-    plan = serializers.SerializerMethodField()
-    port_number_masked = serializers.SerializerMethodField()
-    order_reference = serializers.SerializerMethodField()
-    line_id = serializers.SerializerMethodField()
-    feedback_submitted = serializers.SerializerMethodField()
-
-    class Meta:
-        model = SwitchRequest
-        fields = [
-            "id",
-            "reference",
-            "first_name",
-            "plan",
-            "contract_term",
-            "sim_type",
-            "switch_route",
-            "port_number_masked",
-            "pac_later",
-            "code_type",
-            "status",
-            "status_label",
-            "milestone",
-            "milestones",
-            "pac_status",
-            "estimated_completion_date",
-            "history",
-            "order_reference",
-            "line_id",
-            "feedback_submitted",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = fields
-
-    def get_plan(self, obj):
-        return {"id": obj.plan_id, "name": obj.selected_plan} if obj.selected_plan else None
-
-    def get_port_number_masked(self, obj):
-        return services.mask_number(obj.port_number)
-
-    def get_order_reference(self, obj):
-        return obj.order.order_reference if obj.order_id else None
-
-    def get_line_id(self, obj):
-        return str(obj.line.uuid) if obj.line_id else None
-
-    def get_feedback_submitted(self, obj):
-        return hasattr(obj, "feedback")
-
+# ── Other inputs ──────────────────────────────────────────────────────────────
 
 class PortCodeSerializer(serializers.Serializer):
     """POST /api/switch-requests/<reference>/port-code/"""
