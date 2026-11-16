@@ -13,7 +13,7 @@ reportlab==4.4.4
 requests==2.34.2
 sqlparse==0.6.0
 tzdata==2026.3
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 gunicorn==26.2.0
 whitenoise
 dj-database-url
