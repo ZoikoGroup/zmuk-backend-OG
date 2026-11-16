@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Your payment receipt – Zoiko Mobile</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+          <tr>
+            <td style="background:#0e1929;padding:32px 40px;text-align:center;">
+              <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:1px;">ZOIKO <span style="color:#e6007e;">MOBILE</span></h1>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:40px 40px 24px;">
+              <h2 style="margin:0 0 16px;color:#0e1929;font-size:22px;font-weight:700;">Payment received</h2>
+              <p style="margin:0 0 12px;color:#444;font-size:15px;line-height:1.6;">Hi {{ first_name }},</p>
+              <p style="margin:0 0 16px;color:#444;font-size:15px;line-height:1.6;">
+                Thank you. We've received your payment of <strong>{{ total }}</strong>. Your receipt is attached.
+              </p>
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:8px;padding:20px;margin-bottom:24px;">
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Receipt:</strong> {{ receipt_number }}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Order:</strong> {{ order_reference }}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#444;"><strong style="color:#0e1929;">Switch request:</strong> {{ request_reference }}</td></tr>
+              </table>
+              <p style="margin:0 0 12px;color:#555;font-size:13px;line-height:1.6;">
+                This receipt confirms payment only. It does not confirm that your SIM is active or that your number has transferred. You can follow your switch in your account.
+              </p>
+              <p style="margin:0 0 24px;color:#555;font-size:13px;line-height:1.6;">
+                All prices include VAT. This is proof of payment, not a VAT invoice. If you need a VAT invoice, contact <a href="mailto:info@zoikomobile.co.uk" style="color:#0e8f74;">info@zoikomobile.co.uk</a>.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background:#f4f4f5;padding:24px 40px;text-align:center;">
+              <p style="margin:0;color:#aaa;font-size:12px;">Zoiko Mobile UK Ltd · Company no. 16564980 · <a href="https://zoikomobile.co.uk" style="color:#aaa;">zoikomobile.co.uk</a></p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

@@ -399,6 +399,40 @@ class SwitchRequestSerializer(serializers.ModelSerializer):
 
 # ── Other inputs ──────────────────────────────────────────────────────────────
 
+class ContinuationTokenSerializer(serializers.Serializer):
+    """POST /api/switch-requests/continue/check/ and /claim/"""
+
+    token = serializers.CharField(max_length=200, trim_whitespace=True)
+
+
+class _ShownDocumentSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    sha256 = serializers.RegexField(r"^[0-9a-fA-F]{64}$")
+
+
+class ConsentSerializer(serializers.Serializer):
+    """POST /api/switch-requests/<ref>/documents/consent/"""
+
+    pack_id = serializers.UUIDField()
+    # The two documents shown to the customer, exactly as issued.
+    documents = _ShownDocumentSerializer(many=True)
+    accepted = serializers.BooleanField()
+    immediate_service_requested = serializers.BooleanField(default=False)
+
+    def validate_accepted(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                "Please confirm you have received the documents and agree to the contract.")
+        return value
+
+
+class ResendLinkSerializer(serializers.Serializer):
+    """POST /api/switch-requests/continue/resend/"""
+
+    reference = serializers.CharField(max_length=20)
+    email = serializers.EmailField()
+
+
 class PortCodeSerializer(serializers.Serializer):
     """POST /api/switch-requests/<reference>/port-code/"""
 

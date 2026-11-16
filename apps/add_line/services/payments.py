@@ -17,6 +17,7 @@ from django.utils import timezone
 from apps.coupons.models import Coupon, CouponUsage
 from core.stripe_compat import to_plain
 
+from .. import signals
 from ..models import AddLineOrder
 from . import audit, capacity
 
@@ -78,6 +79,7 @@ def handle_payment_succeeded(order: AddLineOrder, intent) -> AddLineOrder:
             order.fulfilment_status = AddLineOrder.FulfilmentStatus.NOT_STARTED
             order.save(update_fields=["fulfilment_status", "updated_at"])
 
+    signals.send(signals.order_paid, sender=AddLineOrder, order=order)
     return _fulfil_after_payment(order)
 
 
@@ -120,6 +122,7 @@ def record_payment_failure(order: AddLineOrder, intent) -> bool:
 
 def mark_free_order_paid(order: AddLineOrder) -> AddLineOrder:
     """£0 orders (100% promo) skip Stripe entirely."""
+    newly_paid = False
     with transaction.atomic():
         order = AddLineOrder.objects.select_for_update().get(pk=order.pk)
         if order.payment_status != AddLineOrder.PaymentStatus.PAID:
@@ -131,6 +134,9 @@ def mark_free_order_paid(order: AddLineOrder) -> AddLineOrder:
             if order.coupon_id:
                 _record_coupon_use(order)
             audit.record("payment_succeeded", order=order, after=order.payment_status, free=True)
+            newly_paid = True
+    if newly_paid:
+        signals.send(signals.order_paid, sender=AddLineOrder, order=order)
     return _fulfil_after_payment(order)
 
 

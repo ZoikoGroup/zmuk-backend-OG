@@ -481,6 +481,16 @@ SWITCH_ORDER_CONVERSION_ENABLED = os.getenv("SWITCH_ORDER_CONVERSION_ENABLED", "
 # 2026). The 30-day code-validity check runs either way.
 SWITCH_CODE_DELETION_ENABLED = os.getenv("SWITCH_CODE_DELETION_ENABLED", "False") == "True"
 
+# Milestone 4 continuation link: emailed when a request is ready for order,
+# single use, valid for this many hours. The link is FRONTEND_URL + path +
+# "?token=…"; the frontend page posts the token back to the API.
+SWITCH_CONTINUATION_TTL_HOURS = int(os.getenv("SWITCH_CONTINUATION_TTL_HOURS", "48"))
+SWITCH_CONTINUATION_PATH = os.getenv("SWITCH_CONTINUATION_PATH", "/switch-and-save/continue")
+
+# How long issued contract documents (and the price frozen in them) can be
+# agreed to. After that the customer gets a fresh set.
+SWITCH_DOCUMENTS_VALID_MINUTES = int(os.getenv("SWITCH_DOCUMENTS_VALID_MINUTES", "60"))
+
 # =============================================================================
 # ROAMING & TRAVEL (apps.roaming)
 # =============================================================================

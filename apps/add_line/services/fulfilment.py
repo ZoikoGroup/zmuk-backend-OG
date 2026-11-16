@@ -32,6 +32,7 @@ from apps.sims.psim import deliver_details
 from apps.sims.transatel import TransatelError, get_service
 from apps.sims.transatel.service import build_subscriber_info
 
+from .. import signals
 from ..models import AddLineOrder, Line
 from . import audit, capacity, porting
 from .checkout import cart_key
@@ -125,6 +126,7 @@ def _ensure_line(order: AddLineOrder, sim: Sim) -> Line:
     if order.hold_id:
         capacity.consume_hold(order.hold)
     audit.record("line_created", line=line, order=order, after=line.status)
+    signals.send(signals.line_created, sender=AddLineOrder, order=order, line=line)
     return line
 
 

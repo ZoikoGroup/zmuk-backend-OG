@@ -260,7 +260,13 @@ def history(switch: SwitchRequest) -> list[dict]:
     your request", and repeats of the same step are shown once."""
     labels = dict(S.choices)
     out = []
+    internal = (
+        SwitchStatusEvent.Kind.LINK_SENT, SwitchStatusEvent.Kind.CLAIMED, SwitchStatusEvent.Kind.CONSENTED,
+        SwitchStatusEvent.Kind.CHECKOUT_STARTED, SwitchStatusEvent.Kind.CODE_TRANSFERRED,
+    )
     for event in switch.events.all():
+        if event.kind in internal:
+            continue
         status = event.status_after
         if event.kind == SwitchStatusEvent.Kind.CODE_RECEIVED:
             label = "Switching code received"

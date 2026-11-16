@@ -94,7 +94,28 @@ def start_checkout(user, *, quote_token, switch_choice, billing, delivery_addres
         quote = redeem_token(user, quote_token)
     except QuoteError as exc:
         raise CheckoutError(exc.code, exc.message, 409 if exc.code == "QUOTE_CHANGED" else 400)
+    return _checkout(user, quote, switch_choice=switch_choice, billing=billing,
+                     delivery_address=delivery_address, contract=contract,
+                     ip_address=ip_address, user_agent=user_agent)
 
+
+def checkout_quote(user, quote, *, switch_choice, billing, delivery_address, contract,
+                   ip_address=None, user_agent="", metadata=None):
+    """Checkout for a quote the server built itself.
+
+    Switch & Save converts a request using the request's own plan, term, SIM
+    and promo (priced as a first line, so `redeem_token`'s additional-line
+    promo rule doesn't apply). Same checks, holds and PaymentIntent as
+    `start_checkout`.
+    """
+    _check_customer(user)
+    return _checkout(user, quote, switch_choice=switch_choice, billing=billing,
+                     delivery_address=delivery_address, contract=contract,
+                     ip_address=ip_address, user_agent=user_agent, metadata=metadata)
+
+
+def _checkout(user, quote, *, switch_choice, billing, delivery_address, contract,
+              ip_address=None, user_agent="", metadata=None):
     _check_contract(contract)
     if quote.sim_type == SimType.PSIM and not delivery_address:
         raise CheckoutError("DELIVERY_ADDRESS_REQUIRED", "Enter a delivery address for your SIM.")
@@ -156,7 +177,9 @@ def start_checkout(user, *, quote_token, switch_choice, billing, delivery_addres
             currency="gbp",
             automatic_payment_methods={"enabled": True},
             receipt_email=order.billing.get("email") or None,
-            metadata={"add_line_order": order.order_reference, "source": STRIPE_SOURCE},
+            # `source` and `add_line_order` are what the webhook matches on;
+            # extra keys (e.g. switch_request) are for support only.
+            metadata={**(metadata or {}), "add_line_order": order.order_reference, "source": STRIPE_SOURCE},
             idempotency_key=f"add-line-intent-{order.order_reference}",
         )
     except Exception:

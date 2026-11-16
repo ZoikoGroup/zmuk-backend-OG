@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from core.stripe_compat import to_plain
 
+from . import signals
 from .models import AddLineOrder, Line, LineClaim, PortRequest
 from .serializers import (
     AddLineOrderSerializer,
@@ -322,6 +323,12 @@ def stripe_webhook(request):
     if event.get("livemode") is not payments.expected_livemode():
         logger.error("Add-line webhook %s ignored: livemode does not match this environment", event.get("id"))
         return JsonResponse({"received": True, "ignored": "wrong mode"})
+
+    if event.get("type") in signals.CHARGE_EVENTS:
+        # Refunds and disputes: recorded by whoever owns the payment
+        # (Switch & Save receipts); add_line keeps no refund state itself.
+        signals.send(signals.charge_event, sender=None, event=event)
+        return JsonResponse({"received": True})
 
     intent = event["data"]["object"]
     metadata = intent.get("metadata") or {}
