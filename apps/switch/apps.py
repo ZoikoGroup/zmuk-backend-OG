@@ -6,3 +6,8 @@ class SwitchConfig(AppConfig):
     name = "apps.switch"
     label = "switch"
     verbose_name = "Number Switch"
+
+    def ready(self):
+        from .conversion import connect
+
+        connect()

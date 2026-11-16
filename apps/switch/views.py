@@ -3,24 +3,26 @@ import re
 from hmac import compare_digest
 
 from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
 from django.db import IntegrityError, transaction
-from django.template.loader import render_to_string
+from django.http import HttpResponse
 from django.urls import reverse
-from django.utils.html import strip_tags
 
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
-from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from apps.add_line.services.quote import QuoteError, build_quote
 
-from . import services
+from . import continuation, ordering, receipts, services
+from .emails import send_html_email as _send_html_email
 from .models import SwitchFeedback, SwitchRequest
 from .serializers import (
+    ConsentSerializer,
+    ContinuationTokenSerializer,
     FeedbackSerializer,
+    ResendLinkSerializer,
     GuestStatusSerializer,
     OwnerStatusSerializer,
     PortCodeSerializer,
@@ -41,29 +43,6 @@ def _acknowledgement(reference):
         f"Thank you. We've received your request. Your reference is {reference}. "
         "We'll let you know if we need anything else."
     )
-
-
-# ── Email helper (same pattern as accounts app) ───────────────────────────────
-
-def _send_html_email(subject, template_name, context, recipient):
-    """Send branded HTML email. Returns True on success, False on failure (logged)."""
-    try:
-        html_body = render_to_string(template_name, context)
-        text_body = strip_tags(html_body)
-        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None) or "noreply@zoikomobile.co.uk"
-
-        msg = EmailMultiAlternatives(
-            subject=subject,
-            body=text_body,
-            from_email=from_email,
-            to=[recipient],
-        )
-        msg.attach_alternative(html_body, "text/html")
-        msg.send()
-        return True
-    except Exception:
-        logger.exception("Failed to send switch email '%s' (request email masked)", subject)
-        return False
 
 
 def _send_submission_emails(instance):
@@ -155,6 +134,18 @@ class SwitchFeedbackThrottle(_IPThrottle):
 class SwitchQuoteThrottle(_IPThrottle):
     scope = "switch_quote"
     rate = "60/hour"
+
+
+class SwitchContinueThrottle(_IPThrottle):
+    # Link checks and claims; tokens are 256-bit, this just limits noise.
+    scope = "switch_continue"
+    rate = "30/hour"
+
+
+class SwitchResendThrottle(_IPThrottle):
+    # Each accepted call sends an email.
+    scope = "switch_resend"
+    rate = "5/hour"
 
 
 # ── Access helpers ────────────────────────────────────────────────────────────
@@ -425,6 +416,271 @@ class SwitchQuoteView(APIView):
             },
             "consent_version": settings.SWITCH_CONSENT_VERSION,
         })
+
+
+# ── Milestone 4 · B1: continuation link ───────────────────────────────────────
+
+def _continuation_fail(exc: continuation.ContinuationError):
+    return _fail(exc.message, exc.status, code=exc.code)
+
+
+class ContinuationCheckView(APIView):
+    """POST /api/switch-requests/continue/check/  { token }
+
+    The page the email link opens calls this first. Signed out → show
+    "sign in or create an account" (then call /claim/). Returns no personal
+    data beyond the masked email, so the customer knows which address to use.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [SwitchContinueThrottle]
+
+    def post(self, request):
+        s = ContinuationTokenSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            switch, claimed = continuation.check_link(s.validated_data["token"], request.user)
+        except continuation.ContinuationError as exc:
+            return _continuation_fail(exc)
+        return _ok("This link is valid.", {
+            "reference": switch.reference,
+            "plan": {"id": switch.plan_id, "name": switch.selected_plan} if switch.selected_plan else None,
+            "email_masked": services.mask_email(switch.email),
+            "claimed": claimed,
+            "sign_in_required": not request.user.is_authenticated,
+        })
+
+
+class ContinuationClaimView(APIView):
+    """POST /api/switch-requests/continue/claim/  { token }   (signed in)
+
+    Uses up the link and attaches the request to the signed-in account.
+    Returns the owner status view.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [SwitchContinueThrottle]
+
+    def post(self, request):
+        s = ContinuationTokenSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            switch = continuation.claim(s.validated_data["token"], request.user)
+        except continuation.ContinuationError as exc:
+            return _continuation_fail(exc)
+        return _ok("Your switch request is now linked to your account.", OwnerStatusSerializer(switch).data)
+
+
+class ContinuationResendView(APIView):
+    """POST /api/switch-requests/continue/resend/  { reference, email }
+
+    Always the same reply, so it can't be used to test references or emails.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [SwitchResendThrottle]
+
+    def post(self, request):
+        s = ResendLinkSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            continuation.resend_link(s.validated_data["reference"], s.validated_data["email"])
+        except continuation.ContinuationError as exc:
+            if exc.code == "NOT_AVAILABLE":
+                return _continuation_fail(exc)
+            # Anything else (e.g. a race moving the request on) gets the
+            # standard reply, like a non-matching request would.
+        return _ok(continuation.RESEND_MESSAGE, None)
+
+
+# ── Milestone 4 · B2: order preview and contract documents ────────────────────
+
+class SwitchDocumentsThrottle(UserRateThrottle):
+    # Each new set renders two PDFs and sends an email.
+    scope = "switch_documents"
+    rate = "20/hour"
+
+
+def _order_fail(exc: ordering.OrderError):
+    return _fail(exc.message, exc.status, code=exc.code)
+
+
+class OrderPreviewView(APIView):
+    """GET /api/switch-requests/<reference>/order/   (signed-in owner)
+
+    The review screen: today's price (re-checked against the catalogue),
+    whether it changed since the request, delivery/billing address, and the
+    current contract documents if any were issued.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, reference):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+            data = ordering.preview(switch, request.user)
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        return _ok("Your order details.", data)
+
+
+class ContractDocumentsView(APIView):
+    """GET  /api/switch-requests/<reference>/documents/  → current documents (or null)
+    POST /api/switch-requests/<reference>/documents/  → issue them (freezes the price)
+
+    POST returns the same documents again while they're valid and nothing
+    changed, so the customer always agrees to the bytes they were given.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_throttles(self):
+        return [SwitchDocumentsThrottle()] if self.request.method == "POST" else []
+
+    def get(self, request, reference):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        return _ok("Your contract documents.",
+                   ordering.pack_data(ordering.current_pack(switch, request.user)))
+
+    def post(self, request, reference):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+            pack = ordering.issue_documents(switch, request.user)
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        return _ok("Your contract documents are ready.", ordering.pack_data(pack), status.HTTP_201_CREATED)
+
+
+class ContractDocumentDownloadView(APIView):
+    """GET /api/switch-requests/<reference>/documents/<document_id>/  → the PDF
+
+    Owner only; the exact stored bytes, checked against their SHA-256.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, reference, document_id):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+            doc = ordering.get_document(switch, request.user, document_id)
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        response = HttpResponse(bytes(doc.pdf), content_type=ordering.PDF)
+        response["Content-Disposition"] = f'attachment; filename="{doc.filename}"'
+        response["Content-Length"] = str(doc.size)
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["X-Robots-Tag"] = "noindex"
+        response["X-Document-SHA256"] = doc.sha256
+        return response
+
+
+# ── Milestone 4 · B3: consent and checkout ────────────────────────────────────
+
+class SwitchCheckoutThrottle(UserRateThrottle):
+    scope = "switch_checkout"
+    rate = "20/hour"
+
+
+class ContractConsentView(APIView):
+    """POST /api/switch-requests/<reference>/documents/consent/
+
+    { pack_id, documents: [{id, sha256}, {id, sha256}], accepted: true,
+      immediate_service_requested?: bool }
+
+    Records express consent to exactly the documents issued (both ids and
+    hashes must match). Returns the pack with `consented: true`.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [SwitchCheckoutThrottle]
+
+    def post(self, request, reference):
+        s = ConsentSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        try:
+            switch = ordering.get_owned(reference, request.user)
+            pack = ordering.consent(
+                switch, request.user, pack_id=data["pack_id"],
+                documents_given=[{"id": d["id"], "sha256": d["sha256"]} for d in data["documents"]],
+                immediate_service_requested=data["immediate_service_requested"],
+                ip_address=request.META.get("REMOTE_ADDR"), user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            )
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        return _ok("Thank you. Your agreement has been recorded.", ordering.pack_data(pack))
+
+
+class SwitchCheckoutView(APIView):
+    """POST /api/switch-requests/<reference>/checkout/   → Stripe payment
+
+    Needs a consented, still-valid document pack. Returns
+    { order_reference, client_secret, payment_required, amount, currency,
+      confirm_url }: confirm with Stripe Elements, then POST confirm_url.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [SwitchCheckoutThrottle]
+
+    def post(self, request, reference):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+            result = ordering.start_checkout(
+                switch, request.user,
+                ip_address=request.META.get("REMOTE_ADDR"), user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            )
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        return _ok("Your order is ready for payment." if result["payment_required"]
+                   else "Your order has been placed. No payment was taken.",
+                   result, status.HTTP_201_CREATED)
+
+
+# ── Milestone 4 · B4: "Your documents" and payment receipts ───────────────────
+
+class OrderDocumentsView(APIView):
+    """GET /api/switch-requests/<reference>/order-documents/   (owner)
+
+    The "Your documents" card after ordering: the contract documents the
+    customer agreed to, the payment receipt only once the payment is
+    confirmed, and the payment wording to show (document 03 §07).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, reference):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        return _ok("Your documents.", receipts.documents_card(switch))
+
+
+class ReceiptDownloadView(APIView):
+    """GET /api/switch-requests/<reference>/receipts/<receipt_id>/  → the PDF (owner only)"""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, reference, receipt_id):
+        try:
+            switch = ordering.get_owned(reference, request.user)
+        except ordering.OrderError as exc:
+            return _order_fail(exc)
+        receipt = receipts.get_receipt(switch, request.user, receipt_id)
+        if receipt is None:
+            return _fail("We couldn't open your receipt. Please try again, or contact support.",
+                         status.HTTP_404_NOT_FOUND, code="RECEIPT_UNAVAILABLE")
+        response = HttpResponse(bytes(receipt.pdf), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{receipt.filename}"'
+        response["Content-Length"] = str(receipt.size)
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["X-Robots-Tag"] = "noindex"
+        return response
 
 
 class SwitchRequestListView(generics.ListAPIView):

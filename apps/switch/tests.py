@@ -1,6 +1,8 @@
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from io import StringIO
+from types import SimpleNamespace
 from unittest import mock
 
 from cryptography.fernet import Fernet
@@ -17,11 +19,27 @@ from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from apps.add_line.models import AddLineOrder, Line, PortRequest
-from apps.add_line.services import pac
+from apps.add_line.services import pac, payments
 from apps.coupons.models import Coupon
 from apps.plans.models import Plan
-from apps.switch import services
-from apps.switch.models import SwitchRequest, SwitchStatusEvent, generate_reference
+from apps.sims.models import Sim
+from apps.switch import continuation, documents, receipts, services
+from apps.switch.models import (
+    ContractTermRule,
+    ContractTerms,
+    ImmutableRecord,
+    PlanTariff,
+    SwitchContinuationToken,
+    SwitchContractConsent,
+    SwitchContractDocument,
+    SwitchContractPack,
+    SwitchDocumentDelivery,
+    SwitchPaymentCapture,
+    SwitchPaymentReceipt,
+    SwitchRequest,
+    SwitchStatusEvent,
+    generate_reference,
+)
 
 KEY = Fernet.generate_key().decode()
 CREATE_URL = "/api/switch-requests/"
@@ -670,6 +688,770 @@ class AdminTests(SwitchTestBase):
         self.assertNotIn(cust_sr.reference, ops_page)
         self.assertIn(cust_sr.reference, cust_page)
         self.assertNotIn(ops_sr.reference, cust_page)
+
+
+@override_settings(SWITCH_ORDER_CONVERSION_ENABLED=True, FRONTEND_URL="https://zoiko.test",
+                   SWITCH_CONTINUATION_TTL_HOURS=48)
+class ContinuationTests(SwitchTestBase):
+    """Milestone 4 · B1: secure continuation link and claim."""
+
+    CHECK = "/api/switch-requests/continue/check/"
+    CLAIM = "/api/switch-requests/continue/claim/"
+    RESEND = "/api/switch-requests/continue/resend/"
+
+    def setUp(self):
+        super().setUp()
+        self.submit()
+        self.sr = SwitchRequest.objects.get()
+        self.sr.set_status(S.READY_FOR_ORDER)
+        self.user = User.objects.create_user("jane", "jane@example.com", "pw")
+        mail.outbox.clear()
+
+    def issue(self):
+        continuation.issue_link(self.sr)
+        body = mail.outbox[-1].alternatives[0][0]
+        match = re.search(r"https://zoiko\.test/switch-and-save/continue\?token=([A-Za-z0-9_\-]+)", body)
+        self.assertIsNotNone(match, "link missing from email")
+        return match.group(1)
+
+    def claim(self, token, user=None):
+        client = APIClient()
+        client.force_authenticate(user or self.user)
+        return client.post(self.CLAIM, {"token": token}, format="json")
+
+    def test_link_is_emailed_and_only_its_hash_stored(self):
+        token = self.issue()
+        self.assertEqual(mail.outbox[-1].to, ["jane@example.com"])
+        self.assertIn(self.sr.reference, mail.outbox[-1].subject)
+        stored = SwitchContinuationToken.objects.get()
+        self.assertNotEqual(stored.token_hash, token)
+        self.assertEqual(len(stored.token_hash), 64)
+        self.assertTrue(stored.delivered)
+        self.assertEqual(stored.sent_to, "j***@example.com")
+        self.assertTrue(self.sr.events.filter(kind="link_sent").exists())
+        # Internal history entries aren't shown to the customer.
+        self.assertNotIn("link_sent", [h["event"] for h in services.history(self.sr)])
+
+    def test_check_signed_out(self):
+        token = self.issue()
+        resp = self.client.post(self.CHECK, {"token": token}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        data = resp.data["data"]
+        self.assertEqual(data["reference"], self.sr.reference)
+        self.assertEqual(data["email_masked"], "j***@example.com")
+        self.assertTrue(data["sign_in_required"])
+        self.assertFalse(data["claimed"])
+        for personal in ("first_name", "email", "mobile", "address_line_1", "postcode"):
+            self.assertNotIn(personal, data)
+        # Checking doesn't use the link up.
+        self.assertIsNone(SwitchContinuationToken.objects.get().used_at)
+
+    def test_claim_needs_sign_in(self):
+        token = self.issue()
+        resp = self.client.post(self.CLAIM, {"token": token}, format="json")
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertIsNone(SwitchRequest.objects.get().user)
+
+    def test_claim_links_request_and_uses_the_link(self):
+        token = self.issue()
+        resp = self.claim(token)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["data"]["reference"], self.sr.reference)
+        self.assertEqual(resp.data["data"]["first_name"], "Jane")  # owner view
+        sr = SwitchRequest.objects.get()
+        self.assertEqual(sr.user, self.user)
+        self.assertIsNotNone(sr.claimed_at)
+        stored = SwitchContinuationToken.objects.get()
+        self.assertEqual(stored.used_by, self.user)
+        self.assertTrue(sr.events.filter(kind="claimed", actor=self.user).exists())
+
+        # Same account again (e.g. a double click): fine. Another account: refused.
+        self.assertEqual(self.claim(token).status_code, 200)
+        other = User.objects.create_user("sam", "sam@example.com", "pw")
+        resp = self.claim(token, other)
+        self.assertEqual((resp.status_code, resp.data["code"]), (410, "LINK_USED"))
+        self.assertEqual(SwitchRequest.objects.get().user, self.user)
+
+    def test_request_owned_by_another_account_is_never_moved(self):
+        other = User.objects.create_user("sam", "sam@example.com", "pw")
+        SwitchRequest.objects.update(user=other)
+        self.sr.refresh_from_db()
+        token = self.issue()
+        resp = self.claim(token)
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "REQUEST_BELONGS_TO_ANOTHER_ACCOUNT"))
+        self.assertEqual(SwitchRequest.objects.get().user, other)
+        self.assertIsNone(SwitchContinuationToken.objects.get().used_at)
+
+    def test_expired_link(self):
+        token = self.issue()
+        SwitchContinuationToken.objects.update(expires_at=timezone.now() - timedelta(minutes=1))
+        for resp in (self.client.post(self.CHECK, {"token": token}, format="json"), self.claim(token)):
+            self.assertEqual((resp.status_code, resp.data["code"]), (410, "LINK_EXPIRED"))
+
+    def test_new_link_replaces_old_one(self):
+        old = self.issue()
+        new = self.issue()
+        resp = self.client.post(self.CHECK, {"token": old}, format="json")
+        self.assertEqual((resp.status_code, resp.data["code"]), (404, "INVALID_LINK"))
+        self.assertEqual(self.claim(new).status_code, 200)
+
+    def test_unknown_or_tampered_link(self):
+        token = self.issue()
+        for bad in ("nope", token[:-1] + ("A" if token[-1] != "A" else "B")):
+            resp = self.client.post(self.CHECK, {"token": bad}, format="json")
+            self.assertEqual((resp.status_code, resp.data["code"]), (404, "INVALID_LINK"))
+
+    def test_request_no_longer_ready(self):
+        token = self.issue()
+        self.sr.set_status(S.ACTION_NEEDED, reason=SwitchRequest.ActionReason.CODE_EXPIRED)
+        resp = self.claim(token)
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "REQUEST_NOT_READY"))
+        with self.assertRaises(continuation.ContinuationError):
+            continuation.issue_link(self.sr)
+
+    def test_unverified_account_cannot_claim(self):
+        token = self.issue()
+        self.user.is_active = False
+        self.user.save()
+        resp = self.claim(token)
+        self.assertEqual((resp.status_code, resp.data["code"]), (403, "EMAIL_NOT_VERIFIED"))
+
+    def test_resend_same_reply_whatever_matches(self):
+        replies = []
+        for ref, email in ((self.sr.reference, "JANE@example.com"), (self.sr.reference, "x@example.com"),
+                           ("ZM-SW-AAAAAAAA", "jane@example.com")):
+            resp = self.client.post(self.RESEND, {"reference": ref, "email": email}, format="json")
+            self.assertEqual(resp.status_code, 200)
+            replies.append(resp.data)
+        self.assertTrue(replies[0] == replies[1] == replies[2])
+        self.assertEqual(len(mail.outbox), 1)  # only the matching one sent
+        self.assertEqual(SwitchContinuationToken.objects.count(), 1)
+
+    def test_switched_off(self):
+        token = self.issue()
+        with override_settings(SWITCH_ORDER_CONVERSION_ENABLED=False):
+            for url, client in ((self.CHECK, self.client), (self.CLAIM, None)):
+                resp = (client.post(url, {"token": token}, format="json") if client else self.claim(token))
+                self.assertEqual((resp.status_code, resp.data["code"]), (404, "NOT_AVAILABLE"))
+            resp = self.client.post(self.RESEND, {"reference": self.sr.reference, "email": "jane@example.com"},
+                                    format="json")
+            self.assertEqual(resp.status_code, 404)
+            with self.assertRaises(continuation.ContinuationError):
+                continuation.issue_link(self.sr)
+
+    def test_admin_ready_for_order_sends_link_only_when_enabled(self):
+        self.sr.set_status(S.VALIDATING)
+        admin_user = User.objects.create_superuser("ops", "ops@example.com", "pw")
+        self.client.force_login(admin_user)
+        with override_settings(SWITCH_ORDER_CONVERSION_ENABLED=False):
+            self.client.post("/admin/switch/switchrequest/", {
+                "action": "mark_ready_for_order", "_selected_action": [self.sr.pk]})
+        self.assertEqual(len(mail.outbox), 0)
+
+        self.sr.set_status(S.VALIDATING)
+        self.client.post("/admin/switch/switchrequest/", {
+            "action": "mark_ready_for_order", "_selected_action": [self.sr.pk]})
+        self.assertEqual(SwitchRequest.objects.get().status, S.READY_FOR_ORDER)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(SwitchContinuationToken.objects.get().created_by, admin_user)
+
+
+def approved_contract_content(plan, term="12M", version="T-1"):
+    """Fully filled, approved Legal terms + Product tariff (test data only)."""
+    fields = {f: f"Approved {f.replace('_', ' ')}." for f in documents._TERMS_FIELDS[6:]}
+    terms = ContractTerms.objects.create(version=version, approved=True, approved_at=timezone.now(), **fields)
+    ContractTermRule.objects.create(terms=terms, term=term, minimum_commitment="12 months from activation.",
+                                    renewal="Rolls monthly.", early_termination="Remaining months x price.")
+    tariff = PlanTariff.objects.create(
+        plan=plan, version="P-1", approved=True, approved_at=timezone.now(),
+        **{f: f"Approved {f.replace('_', ' ')}." for f in documents._TARIFF_FIELDS},
+    )
+    return terms, tariff
+
+
+def pdf_pages(data: bytes) -> int:
+    return len(re.findall(rb"/Type\s*/Page[^s]", data))
+
+
+@override_settings(SWITCH_ORDER_CONVERSION_ENABLED=True, SWITCH_DOCUMENTS_VALID_MINUTES=60)
+class ContractDocumentsTests(SwitchTestBase):
+    """Milestone 4 · B2: order preview and pre-contract documents."""
+
+    def setUp(self):
+        super().setUp()
+        self.submit()
+        self.user = User.objects.create_user("jane", "jane@example.com", "pw")
+        SwitchRequest.objects.update(user=self.user)
+        self.sr = SwitchRequest.objects.get()
+        self.sr.set_status(S.READY_FOR_ORDER)
+        self.terms, self.tariff = approved_contract_content(self.plan)
+        self.client.force_authenticate(self.user)
+        mail.outbox.clear()
+
+    def url(self, suffix):
+        return f"/api/switch-requests/{self.sr.reference}/{suffix}"
+
+    def issue(self):
+        return self.client.post(self.url("documents/"), format="json")
+
+    def test_preview(self):
+        resp = self.client.get(self.url("order/"))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        data = resp.data["data"]
+        self.assertEqual(data["quote"]["monthly_price"], "9.00")
+        self.assertFalse(data["price_changed"])
+        self.assertTrue(data["documents_available"])
+        self.assertIsNone(data["documents"])
+        self.assertEqual(data["billing_address"]["postcode"], "SW1A 1AA")
+        self.assertEqual(data["port_number_masked"], "07*** ***123")
+
+    def test_preview_flags_a_price_change(self):
+        Plan.objects.filter(pk=self.plan.pk).update(price_12=Decimal("11.00"))
+        data = self.client.get(self.url("order/")).data["data"]
+        self.assertTrue(data["price_changed"])
+        self.assertEqual(data["submitted_price"]["monthly_price"], "9.00")
+        self.assertEqual(data["quote"]["monthly_price"], "11.00")
+
+    def test_owner_only_and_gates(self):
+        other = User.objects.create_user("sam", "sam@example.com", "pw")
+        self.client.force_authenticate(other)
+        for resp in (self.client.get(self.url("order/")), self.issue()):
+            self.assertEqual((resp.status_code, resp.data["code"]), (404, "NOT_FOUND"))
+        self.client.force_authenticate(None)
+        self.assertIn(self.client.get(self.url("order/")).status_code, (401, 403))
+
+        self.client.force_authenticate(self.user)
+        with override_settings(SWITCH_ORDER_CONVERSION_ENABLED=False):
+            self.assertEqual(self.issue().data["code"], "NOT_AVAILABLE")
+        self.sr.set_status(S.VALIDATING)
+        self.assertEqual(self.issue().data["code"], "REQUEST_NOT_READY")
+
+    def test_expired_code_blocks(self):
+        self.sr.set_status(S.READY_FOR_ORDER)
+        SwitchRequest.objects.update(code_received_at=timezone.now() - timedelta(days=31))
+        resp = self.issue()
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "CODE_EXPIRED"))
+
+    def test_issue_documents(self):
+        resp = self.issue()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        data = resp.data["data"]
+        self.assertTrue(data["contract_reference"].startswith("ZM-CQ-"))
+        self.assertEqual(data["email_status"], "sent")
+        self.assertEqual([d["kind"] for d in data["documents"]], ["contract_summary", "contract_information"])
+
+        pack = SwitchContractPack.objects.get()
+        for doc in pack.documents.all():
+            pdf = bytes(doc.pdf)
+            self.assertTrue(pdf.startswith(b"%PDF"))
+            self.assertEqual(doc.sha256, documents.sha256(pdf))
+        summary = pack.documents.get(kind="contract_summary")
+        self.assertEqual(pdf_pages(bytes(summary.pdf)), 1)  # CS-03
+
+        # Frozen content: from the quote and approved records, never the code.
+        content_text = str(pack.content)
+        self.assertIn("Zoiko Mobile UK Ltd", content_text)
+        self.assertIn("16564980", content_text)
+        self.assertNotIn("ABC123456", content_text)
+        self.assertEqual(pack.content["price"]["core"], "£9.00 per month")
+        self.assertRegex(pack.content["references"]["issued_at"], r" (GMT|BST)$")  # UK time
+        self.assertEqual((pack.terms_version, pack.tariff_version), ("T-1", "P-1"))
+
+        # Durable copy by email with both PDFs.
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(len(mail.outbox[0].attachments), 2)
+        self.assertNotIn("ABC123456", mail.outbox[0].subject + mail.outbox[0].body)
+
+    def test_same_documents_until_something_changes(self):
+        first = self.issue().data["data"]
+        again = self.issue().data["data"]
+        self.assertEqual(first["id"], again["id"])
+        self.assertEqual(SwitchContractPack.objects.count(), 1)
+        self.assertEqual(len(mail.outbox), 1)
+
+        # New approved Legal version → a fresh set; the old one is superseded, not changed.
+        old_summary = SwitchContractDocument.objects.get(kind="contract_summary")
+        old_bytes = bytes(old_summary.pdf)
+        approved_contract_content(make_plan(name="Other", transatelID="X"), version="T-2")
+        newer = self.issue().data["data"]
+        self.assertNotEqual(newer["id"], first["id"])
+        old = SwitchContractPack.objects.get(public_id=first["id"])
+        self.assertIsNotNone(old.superseded_at)
+        old_summary.refresh_from_db()
+        self.assertEqual(bytes(old_summary.pdf), old_bytes)  # CS-10
+        self.assertEqual(self.client.get(self.url("documents/")).data["data"]["id"], newer["id"])
+
+    def test_expired_documents_are_replaced(self):
+        first = self.issue().data["data"]
+        SwitchContractPack.objects.update(offer_valid_until=timezone.now() - timedelta(minutes=1))
+        self.assertIsNone(self.client.get(self.url("documents/")).data["data"])
+        self.assertNotEqual(self.issue().data["data"]["id"], first["id"])
+
+    def test_missing_content_blocks_issue(self):
+        ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="  ")
+        resp = self.issue()
+        self.assertEqual((resp.status_code, resp.data["code"]), (503, "DOCUMENTS_UNAVAILABLE"))
+        self.assertIn("No order has been placed", resp.data["message"])
+        self.assertFalse(SwitchContractPack.objects.exists())
+        self.assertFalse(self.client.get(self.url("order/")).data["data"]["documents_available"])
+
+        ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="ok")
+        PlanTariff.objects.update(approved=False)
+        self.assertEqual(self.issue().status_code, 503)
+
+    def test_summary_must_fit_one_page(self):
+        PlanTariff.objects.update(fair_use="Very long fair use wording. " * 400)
+        resp = self.issue()
+        self.assertEqual((resp.status_code, resp.data["code"]), (503, "DOCUMENTS_UNAVAILABLE"))
+        self.assertFalse(SwitchContractPack.objects.exists())
+
+    def test_download(self):
+        doc_data = self.issue().data["data"]["documents"][0]
+        resp = self.client.get(doc_data["download_url"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        self.assertIn("attachment;", resp["Content-Disposition"])
+        self.assertIn("no-store", resp["Cache-Control"])
+        self.assertEqual(documents.sha256(resp.content), doc_data["sha256"])  # CS-09
+
+        other = User.objects.create_user("sam", "sam@example.com", "pw")
+        self.client.force_authenticate(other)
+        self.assertEqual(self.client.get(doc_data["download_url"]).status_code, 404)  # CS-11
+
+    def test_tampered_document_is_not_served(self):
+        doc_data = self.issue().data["data"]["documents"][0]
+        SwitchContractDocument.objects.filter(public_id=doc_data["id"]).update(pdf=b"%PDF-tampered")
+        resp = self.client.get(doc_data["download_url"])
+        self.assertEqual((resp.status_code, resp.data["code"]), (500, "DOCUMENT_UNAVAILABLE"))
+
+    def test_documents_are_immutable(self):
+        self.issue()
+        doc = SwitchContractDocument.objects.first()
+        doc.filename = "changed.pdf"
+        with self.assertRaises(ImmutableRecord):
+            doc.save()
+        with self.assertRaises(ImmutableRecord):
+            doc.delete()
+
+    def test_email_failure_is_recorded_not_hidden(self):
+        with mock.patch("apps.switch.emails.EmailMultiAlternatives.send", side_effect=RuntimeError("smtp")):
+            data = self.issue().data["data"]
+        self.assertEqual(data["email_status"], "failed")
+
+
+CHECKOUT_SETTINGS = dict(
+    SWITCH_ORDER_CONVERSION_ENABLED=True, SWITCH_DOCUMENTS_VALID_MINUTES=60,
+    STRIPE_SECRET_KEY="sk_test_x", MAX_CONSUMER_LINES=5, LINE_HOLD_MINUTES=30, ADD_LINE_REAUTH_MINUTES=60,
+    ADD_LINE_CONTRACT_VERSION="v1", ADD_LINE_CONTRACT_SUMMARY_VERSION="s1",
+    ADD_LINE_SUPPLIER_WRITES_ENABLED=True,
+)
+
+
+def fake_transatel():
+    service = mock.Mock()
+    service.activate_order_sim.return_value = {
+        "msisdn": "447700900001", "post_status": "Active", "transaction_id": "tx-1",
+        "contact": {"status": "success"},
+    }
+    service.get_subscriber_by_serial.return_value = {"status": "Active"}
+    service.request_uk_port_in.return_value = {"transactionId": "tx-port", "transactionStatus": "PENDING"}
+    return service
+
+
+def fake_paid_intent(order, **charge):
+    """Stripe PaymentIntent as retrieved with expand=["latest_charge"]."""
+    return {
+        "id": order.stripe_payment_intent_id, "status": "succeeded",
+        "metadata": {"add_line_order": order.order_reference, "source": "zoiko_add_line"},
+        "latest_charge": {
+            "id": "ch_123", "captured": True, "amount_captured": int(order.total_gross * 100),
+            "currency": "gbp", "created": 1763280000,
+            "payment_method_details": {"type": "card", "card": {"brand": "visa", "last4": "4242"}},
+            **charge,
+        },
+    }
+
+
+@override_settings(**CHECKOUT_SETTINGS)
+class CheckoutTestBase(SwitchTestBase):
+    """Shared set-up for B3/B4: an owned, ready request with approved content."""
+
+    def setUp(self):
+        super().setUp()
+        self.submit()
+        self.user = User.objects.create_user("jane", "jane@example.com", "pw")
+        self.user.last_login = timezone.now()  # add_line asks for a recent login
+        self.user.save()
+        SwitchRequest.objects.update(user=self.user)
+        self.sr = SwitchRequest.objects.get()
+        self.sr.set_status(S.READY_FOR_ORDER)
+        approved_contract_content(self.plan)
+        Sim.objects.create(iccid="8944000000000000001", msisdn="447700900001",
+                           provisioning_status="Available", type_of_sim="eUICC")
+        self.client.force_authenticate(self.user)
+
+        create = mock.patch("apps.add_line.services.checkout.stripe.PaymentIntent.create",
+                            side_effect=lambda **kw: SimpleNamespace(id="pi_123", client_secret="pi_123_secret"))
+        self.create_intent = create.start()
+        self.addCleanup(create.stop)
+        for target in ("deliver_qr", "deliver_details"):
+            p = mock.patch(f"apps.add_line.services.fulfilment.{target}")
+            p.start()
+            self.addCleanup(p.stop)
+
+    def url(self, suffix):
+        return f"/api/switch-requests/{self.sr.reference}/{suffix}"
+
+    def issue(self):
+        return self.client.post(self.url("documents/"), format="json").data["data"]
+
+    def consent(self, pack, **overrides):
+        body = {"pack_id": pack["id"], "accepted": True,
+                "documents": [{"id": d["id"], "sha256": d["sha256"]} for d in pack["documents"]], **overrides}
+        return self.client.post(self.url("documents/consent/"), body, format="json")
+
+    def checkout(self):
+        return self.client.post(self.url("checkout/"), format="json")
+
+    def pay(self, order, **charge):
+        intent = {"id": order.stripe_payment_intent_id, "status": "succeeded",
+                  "amount": int(order.total_gross * 100), "amount_received": int(order.total_gross * 100),
+                  "currency": "gbp", "livemode": False,
+                  "metadata": {"add_line_order": order.order_reference, "source": "zoiko_add_line"}}
+        service = fake_transatel()
+        with mock.patch("apps.add_line.services.fulfilment.get_service", return_value=service), \
+                mock.patch("apps.add_line.services.porting.get_service", return_value=service), \
+                mock.patch("apps.switch.receipts.stripe.PaymentIntent.retrieve",
+                           return_value=fake_paid_intent(order, **charge)):
+            payments.handle_payment_succeeded(order, intent)
+        return service
+
+    def ready_to_pay(self):
+        pack = self.issue()
+        self.assertEqual(self.consent(pack).status_code, 200)
+        resp = self.checkout()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return pack, resp.data["data"]
+
+
+class ConsentAndCheckoutTests(CheckoutTestBase):
+    """Milestone 4 · B3: consent, Stripe checkout via add_line, conversion on payment."""
+
+    # ── consent ──
+
+    def test_consent_records_exact_documents(self):
+        pack = self.issue()
+        resp = self.consent(pack)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data["data"]["consented"])
+        consent = SwitchContractConsent.objects.get()
+        self.assertEqual(consent.documents, {d["id"]: d["sha256"] for d in pack["documents"]})
+        self.assertIn("I confirm that I have received", consent.statement)
+        self.assertEqual(consent.ip_address, "127.0.0.1")
+        self.assertTrue(self.sr.events.filter(kind="consented").exists())
+        self.assertEqual(self.consent(pack).status_code, 200)  # harmless repeat
+        self.assertEqual(SwitchContractConsent.objects.count(), 1)
+
+    def test_consent_must_match_issued_documents(self):
+        pack = self.issue()
+        wrong = [{"id": d["id"], "sha256": "0" * 64} for d in pack["documents"]]
+        for docs in (wrong, [pack["documents"][0]]):
+            resp = self.consent(pack, documents=[{"id": d["id"], "sha256": d["sha256"]} for d in docs])
+            self.assertEqual((resp.status_code, resp.data["code"]), (409, "DOCUMENTS_MISMATCH"))
+        resp = self.consent(pack, accepted=False)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("accepted", resp.data)
+        self.assertFalse(SwitchContractConsent.objects.exists())
+
+    def test_consent_to_expired_or_replaced_documents(self):
+        pack = self.issue()
+        SwitchContractPack.objects.update(offer_valid_until=timezone.now() - timedelta(minutes=1))
+        resp = self.consent(pack)
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "DOCUMENTS_EXPIRED"))
+
+    def test_consent_evidence_is_immutable(self):
+        self.consent(self.issue())
+        consent = SwitchContractConsent.objects.get()
+        consent.statement = "changed"
+        with self.assertRaises(ImmutableRecord):
+            consent.save()
+
+    # ── checkout ──
+
+    def test_checkout_needs_consent(self):
+        self.issue()
+        resp = self.checkout()
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "CONSENT_REQUIRED"))
+        self.assertFalse(AddLineOrder.objects.exists())
+
+    def test_checkout_creates_add_line_order(self):
+        pack, data = self.ready_to_pay()
+        self.assertEqual(data["client_secret"], "pi_123_secret")
+        self.assertTrue(data["payment_required"])
+        self.assertEqual(data["amount"], "9.00")
+        order = AddLineOrder.objects.get(order_reference=data["order_reference"])
+        self.assertEqual(data["confirm_url"], f"/api/v1/lines/orders/{order.order_reference}/confirm/")
+        self.assertEqual(order.owner, self.user)
+        self.assertEqual(order.switch_choice, "pac")
+        self.assertEqual(order.billing["street"], "10 Example Street")
+        self.assertEqual(order.billing["zip_code"], "SW1A 1AA")
+        self.assertIsNone(order.delivery_address)  # eSIM
+        metadata = self.create_intent.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["switch_request"], self.sr.reference)
+        self.assertEqual(metadata["source"], "zoiko_add_line")
+
+        sr = SwitchRequest.objects.get()
+        self.assertEqual(sr.order, order)
+        self.assertEqual(sr.status, S.READY_FOR_ORDER)  # not converted until paid
+        self.assertEqual(SwitchContractConsent.objects.get().order, order)
+        self.assertFalse(services.tracker(sr)["steps"][1]["done"])
+
+    def test_checkout_again_resumes_the_same_payment(self):
+        _, first = self.ready_to_pay()
+        with mock.patch("apps.switch.ordering.stripe.PaymentIntent.retrieve",
+                        return_value={"id": "pi_123", "client_secret": "pi_123_secret"}):
+            resp = self.checkout()
+        self.assertEqual(resp.data["data"]["order_reference"], first["order_reference"])
+        self.assertEqual(AddLineOrder.objects.count(), 1)
+
+    def test_price_change_after_consent_blocks_checkout(self):
+        self.consent(self.issue())
+        Plan.objects.filter(pk=self.plan.pk).update(price_12=Decimal("11.00"))
+        resp = self.checkout()
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "PRICE_CHANGED"))
+        self.assertFalse(AddLineOrder.objects.exists())
+
+    def test_stripe_failure_places_no_order(self):
+        self.consent(self.issue())
+        self.create_intent.side_effect = RuntimeError("stripe down")
+        resp = self.checkout()
+        self.assertEqual((resp.status_code, resp.data["code"]), (502, "PAYMENT_INIT_FAILED"))
+        self.assertIsNone(SwitchRequest.objects.get().order)
+
+    # ── conversion on payment ──
+
+    def test_payment_converts_and_hands_code_to_transfer(self):
+        _, data = self.ready_to_pay()
+        order = AddLineOrder.objects.get(order_reference=data["order_reference"])
+        service = self.pay(order)
+
+        sr = SwitchRequest.objects.get()
+        self.assertEqual(sr.status, S.CONVERTED)
+        self.assertIsNotNone(sr.converted_at)
+        self.assertEqual(sr.line, Line.objects.get())
+        port = PortRequest.objects.get()
+        self.assertEqual((port.code_type, port.portability_msisdn), ("PAC", "447700900123"))
+        self.assertEqual(pac.decrypt(port.encrypted_code), "ABC123456")
+        self.assertEqual(sr.encrypted_code, "")  # held in one place only
+        service.request_uk_port_in.assert_called_once()
+
+        steps = {s["key"]: s["done"] for s in services.tracker(sr)["steps"]}
+        self.assertEqual(steps, {"request_received": True, "order_placed": True, "sim_ready": True,
+                                 "switch_scheduled": False, "number_transferred": False})
+        self.assertEqual(services.pac_status(sr), "submitted")
+        self.assertTrue(sr.events.filter(kind="code_transferred").exists())
+        self.assertEqual(services.customer_status(sr)[1], "Order created")
+
+        resp = self.checkout()
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "ALREADY_ORDERED"))
+
+    def test_code_later_converts_without_a_transfer(self):
+        SwitchRequest.objects.update(encrypted_code="", pac_later=True)
+        _, data = self.ready_to_pay()
+        self.pay(AddLineOrder.objects.get(order_reference=data["order_reference"]))
+        self.assertEqual(SwitchRequest.objects.get().status, S.CONVERTED)
+        self.assertFalse(PortRequest.objects.exists())
+
+    def test_payment_after_ops_moved_request_is_honoured_and_flagged(self):
+        _, data = self.ready_to_pay()
+        self.sr.refresh_from_db()
+        self.sr.set_status(S.CANCELLED)
+        self.pay(AddLineOrder.objects.get(order_reference=data["order_reference"]))
+        sr = SwitchRequest.objects.get()
+        self.assertEqual(sr.status, S.CONVERTED)
+        self.assertIn("paid while the request was 'cancelled'", sr.ops_note)
+
+    def test_free_order_converts_without_stripe(self):
+        Coupon.objects.create(name="FREE", slug="free", discount=Decimal("9.00"))
+        SwitchRequest.objects.update(promo_code="free")
+        self.sr.refresh_from_db()
+        pack = self.issue()
+        self.consent(pack)
+        with mock.patch("apps.add_line.services.fulfilment.get_service", return_value=fake_transatel()), \
+                mock.patch("apps.add_line.services.porting.get_service", return_value=fake_transatel()):
+            resp = self.checkout()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertFalse(resp.data["data"]["payment_required"])
+        self.create_intent.assert_not_called()
+        self.assertEqual(SwitchRequest.objects.get().status, S.CONVERTED)
+
+    def test_signals_do_not_touch_plain_add_line_orders(self):
+        order = AddLineOrder.objects.create(
+            owner=self.user, plan=self.plan, term="12M", sim_type="esim", switch_choice="none",
+            total_gross=Decimal("9.00"), vat_amount=Decimal("1.50"), stripe_payment_intent_id="pi_x",
+        )
+        self.pay(order)
+        self.assertEqual(SwitchRequest.objects.get().status, S.READY_FOR_ORDER)
+
+
+class ReceiptTests(CheckoutTestBase):
+    """Milestone 4 · B4: payment record, receipt, "Your documents" card."""
+
+    def paid_order(self, **charge):
+        _, data = self.ready_to_pay()
+        order = AddLineOrder.objects.get(order_reference=data["order_reference"])
+        mail.outbox.clear()
+        self.pay(order, **charge)
+        return order
+
+    def card(self):
+        resp = self.client.get(self.url("order-documents/"))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["data"]
+
+    def test_confirmed_payment_gets_one_receipt(self):
+        order = self.paid_order()
+        capture = SwitchPaymentCapture.objects.get()
+        self.assertEqual((capture.order, capture.amount_minor, capture.currency), (order, 900, "GBP"))
+        self.assertEqual(capture.method_label, "Visa ending 4242")
+        self.assertEqual(capture.receipt_status, "ready")
+        receipt = capture.receipt
+        self.assertTrue(receipt.receipt_number.startswith("ZM-RC-"))
+        pdf = bytes(receipt.pdf)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertEqual(pdf_pages(pdf), 1)
+        self.assertEqual(receipt.sha256, documents.sha256(pdf))
+
+        receipt_mail = [m for m in mail.outbox if receipt.receipt_number in m.subject]
+        self.assertEqual(len(receipt_mail), 1)
+        self.assertEqual(receipt_mail[0].attachments[0][0], receipt.filename)
+        self.assertTrue(receipt.deliveries.get().accepted)
+
+        # Replays (webhook + confirm, or the daily job) never add a second one (PR-07).
+        receipts.record_payment(order)
+        with mock.patch("apps.switch.receipts.stripe.PaymentIntent.retrieve",
+                        return_value=fake_paid_intent(order)):
+            receipts.reconcile()
+        self.assertEqual(SwitchPaymentCapture.objects.count(), 1)
+        self.assertEqual(SwitchPaymentReceipt.objects.count(), 1)
+
+    def test_receipt_has_no_vat_details(self):
+        order = self.paid_order()
+        content = receipts.receipt_content(SwitchPaymentCapture.objects.get(), "ZM-RC-TEST")
+        self.assertEqual(content["total"], "£9.00")
+        self.assertNotIn("vat", " ".join(content).lower())
+        self.assertNotIn("ch_123", str(content))  # safe public reference only
+        self.assertTrue(content["transaction_reference"].startswith("TX-"))
+        self.assertEqual(content["order_reference"], order.order_reference)
+
+    def test_documents_card(self):
+        self.paid_order()
+        data = self.card()
+        self.assertEqual(data["payment"]["state"], "paid")
+        self.assertEqual([d["kind"] for d in data["documents"]],
+                         ["contract_summary", "contract_information", "payment_receipt"])
+        receipt_row = data["documents"][2]
+        self.assertEqual(receipt_row["email_status"], "sent")
+        resp = self.client.get(receipt_row["download_url"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(documents.sha256(resp.content), receipt_row["sha256"])
+        # The contract documents in the card are the ones agreed to.
+        consent = SwitchContractConsent.objects.get()
+        self.assertEqual({d["sha256"] for d in data["documents"][:2]}, set(consent.documents.values()))
+
+        other = User.objects.create_user("sam", "sam@example.com", "pw")
+        self.client.force_authenticate(other)
+        self.assertEqual(self.client.get(receipt_row["download_url"]).status_code, 404)
+
+    def test_pending_payment_has_no_receipt(self):
+        self.ready_to_pay()
+        data = self.card()
+        self.assertEqual(data["payment"]["state"], "pending")
+        self.assertNotIn("payment_receipt", [d["kind"] for d in data["documents"]])
+
+    def test_amount_mismatch_withholds_receipt(self):
+        self.paid_order(amount_captured=100)
+        self.assertFalse(SwitchPaymentCapture.objects.exists())
+        self.assertIn("Receipt withheld", SwitchRequest.objects.get().ops_note)
+        self.assertEqual(self.card()["payment"]["state"], "preparing")
+
+    def test_free_order_has_no_receipt(self):
+        Coupon.objects.create(name="FREE", slug="free", discount=Decimal("9.00"))
+        SwitchRequest.objects.update(promo_code="free")
+        self.consent(self.issue())
+        with mock.patch("apps.add_line.services.fulfilment.get_service", return_value=fake_transatel()), \
+                mock.patch("apps.add_line.services.porting.get_service", return_value=fake_transatel()):
+            self.checkout()
+        self.assertFalse(SwitchPaymentCapture.objects.exists())
+        self.assertEqual(self.card()["payment"],
+                         {"state": "no_payment", "message": "No payment was taken for this order."})
+
+    def test_promo_line_items_add_up(self):
+        Coupon.objects.create(name="HALF", slug="half", discount=Decimal("4.50"))
+        SwitchRequest.objects.update(promo_code="half")
+        self.paid_order()
+        content = receipts.receipt_content(SwitchPaymentCapture.objects.get(), "ZM-RC-TEST")
+        self.assertEqual([i[2] for i in content["items"]], ["£9.00", "−£4.50"])
+        self.assertEqual(content["total"], "£4.50")
+
+    def test_receipt_failure_is_retried(self):
+        with mock.patch("apps.switch.documents.render_receipt", side_effect=RuntimeError("pdf")):
+            self.paid_order()
+        capture = SwitchPaymentCapture.objects.get()
+        self.assertEqual((capture.receipt_status, capture.receipt_attempts), ("failed", 1))
+        self.assertEqual(self.card()["payment"]["state"], "preparing")
+
+        out = StringIO()
+        call_command("reconcile_switch_receipts", stdout=out)
+        capture.refresh_from_db()
+        self.assertEqual(capture.receipt_status, "ready")
+        self.assertIn("receipts issued: 1", out.getvalue())
+
+    def _webhook(self, event):
+        with mock.patch("apps.add_line.views.stripe.Webhook.construct_event", return_value=event):
+            return APIClient().post("/api/v1/lines/webhooks/stripe/", b"{}", content_type="application/json",
+                                    HTTP_STRIPE_SIGNATURE="t=1,v1=x")
+
+    @override_settings(STRIPE_ADD_LINE_WEBHOOK_SECRET="whsec_" + "a1" * 16)
+    def test_refund_and_dispute_are_linked_records(self):
+        self.paid_order()
+        receipt = SwitchPaymentReceipt.objects.get()
+        original = bytes(receipt.pdf)
+        refund = {"id": "evt_r1", "type": "charge.refunded", "livemode": False, "created": 1763290000,
+                  "data": {"object": {"id": "ch_123", "amount_refunded": 300, "status": "succeeded"}}}
+        self.assertEqual(self._webhook(refund).status_code, 200)
+        self._webhook(refund)  # replayed
+        capture = SwitchPaymentCapture.objects.get()
+        self.assertEqual((capture.status, capture.refunded_minor), ("partially_refunded", 300))
+        self.assertEqual(capture.adjustments.count(), 1)
+        receipt.refresh_from_db()
+        self.assertEqual(bytes(receipt.pdf), original)  # PR-16
+        self.assertEqual(self.card()["payment"]["message"], "A refund of £3.00 has been issued.")
+
+        dispute = {"id": "evt_d1", "type": "charge.dispute.created", "livemode": False, "created": 1763300000,
+                   "data": {"object": {"id": "dp_1", "charge": "ch_123", "amount": 600,
+                                       "status": "needs_response"}}}
+        self._webhook(dispute)
+        self.assertEqual(self.card()["payment"]["state"], "disputed")
+        self.assertIn("payment_receipt", [d["kind"] for d in self.card()["documents"]])
+
+    def test_staff_resend_is_logged(self):
+        self.paid_order()
+        admin_user = User.objects.create_superuser("ops", "ops@example.com", "pw")
+        self.client.force_login(admin_user)
+        self.client.post("/admin/switch/switchpaymentcapture/", {
+            "action": "resend_receipt", "_selected_action": [SwitchPaymentCapture.objects.get().pk]})
+        resend = SwitchDocumentDelivery.objects.get(resend=True)
+        self.assertEqual((resend.actor, resend.accepted), (admin_user, True))
+        self.assertEqual(resend.recipient_masked, "j***@example.com")
+
+    def test_receipts_are_immutable(self):
+        self.paid_order()
+        receipt = SwitchPaymentReceipt.objects.get()
+        with self.assertRaises(ImmutableRecord):
+            receipt.save()
+        with self.assertRaises(ImmutableRecord):
+            receipt.delete()
 
 
 @override_settings(PAC_ENCRYPTION_KEY=KEY)
