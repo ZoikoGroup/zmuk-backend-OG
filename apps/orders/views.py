@@ -1,6 +1,8 @@
 import logging
+from decimal import InvalidOperation
 
 from django.conf import settings
+from django.db.models import F
 from django.core.mail import EmailMultiAlternatives
 from django.http import HttpResponse, JsonResponse
 from django.template.loader import render_to_string
@@ -13,6 +15,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework import status
 from .serializers import BqOrderSerializer
 from .models import BqOrder, CheckoutPayment
+from .pricing import CheckoutError, money, price_cart
+from apps.coupons.models import Coupon, CouponUsage
 from collections import defaultdict
 
 import stripe
@@ -172,31 +176,84 @@ class CheckoutCreateIntentView(APIView):
     Stripe PaymentIntent. Only order_ref goes into Stripe metadata — the
     full payload lives in our DB, looked up by the webhook after payment.
 
-    Request body: { total, subtotal, discountAmount, cart, billingAddress, shippingAddress }
-    Response: { clientSecret, order_ref }
+    Request body: { total, cart, couponCode?, billingAddress, shippingAddress }
+    (`subtotal` / `discountAmount` may still be sent but are ignored.)
+    Send `Authorization: Token …` when logged in; it is required for public
+    sector / student plans and for coupons.
+    Response: { clientSecret, order_ref, totals }
+
+    Prices, the coupon discount and the total are worked out on the server
+    (apps/orders/pricing.py). `total` is what the customer saw: if it differs
+    from ours we refuse with 409 PRICE_CHANGED and nothing is charged.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
         data = request.data or {}
-        total = data.get("total")
 
         try:
-            amount = float(total)
-        except (TypeError, ValueError):
-            amount = 0
+            client_total = money(data.get("total"))
+        except (InvalidOperation, TypeError, ValueError):
+            client_total = None
+        if client_total is None or client_total <= 0:
+            return Response(
+                {"error": "Invalid total amount", "code": "TOTAL_INVALID", "message": "Invalid total amount"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        if not amount or amount <= 0:
-            return Response({"error": "Invalid total amount"}, status=status.HTTP_400_BAD_REQUEST)
+        coupon_code = data.get("couponCode") or data.get("coupon_code") or ""
+        try:
+            priced = price_cart(data.get("cart"), request.user, coupon_code)
+        except CheckoutError as exc:
+            return Response(exc.as_dict(), status=exc.http_status)
+
+        if priced.total <= 0:
+            message = "There's nothing to pay for this order."
+            return Response(
+                {"error": message, "code": "TOTAL_INVALID", "message": message},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if priced.total != client_total:
+            message = "Prices in your cart have changed. Please review your order."
+            return Response(
+                {
+                    "error": message,
+                    "code": "PRICE_CHANGED",
+                    "message": message,
+                    "totals": priced.totals(),
+                    "lines": priced.summary_lines(),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         billing = data.get("billingAddress") or {}
         email = (billing.get("email") or "").strip()
 
+        # Store our verified lines and totals, not the browser's prices: the
+        # receipt, team alert and order rows are all built from this payload.
+        payload = {
+            **data,
+            "cart": priced.lines,
+            "totals": priced.totals(),
+            "subtotal": float(priced.subtotal),
+            "discountAmount": float(priced.discount),
+            "total": float(priced.total),
+            "coupon": (
+                {"id": priced.coupon.pk, "code": priced.coupon.slug, "discount": str(priced.discount)}
+                if priced.coupon
+                else None
+            ),
+        }
+        payload.pop("couponCode", None)
+        payload.pop("coupon_code", None)
+
         payment = CheckoutPayment.objects.create(
             email=email,
-            amount_pence=int(round(amount * 100)),
+            user=request.user if request.user.is_authenticated else None,
+            amount_pence=int(priced.total * 100),
             currency="gbp",
-            payload=data,
+            payload=payload,
         )
 
         key = getattr(settings, "STRIPE_SECRET_KEY", "") or ""
@@ -225,7 +282,11 @@ class CheckoutCreateIntentView(APIView):
         payment.stripe_payment_intent_id = intent.id
         payment.save(update_fields=["stripe_payment_intent_id"])
 
-        return Response({"clientSecret": intent.client_secret, "order_ref": payment.order_ref})
+        return Response({
+            "clientSecret": intent.client_secret,
+            "order_ref": payment.order_ref,
+            "totals": priced.totals(),
+        })
 
 
 # ── Checkout: poll order status after payment (used by success screen) ───
@@ -313,6 +374,19 @@ class ConfirmCheckoutView(APIView):
             "processed": payment.processed,
         })
 
+def _record_coupon_usage(payment: CheckoutPayment):
+    coupon = (payment.payload or {}).get("coupon") or {}
+    if not coupon.get("id"):
+        return
+    try:
+        CouponUsage.objects.create(
+            coupon_id=coupon["id"], user=payment.user, order_id=payment.order_ref
+        )
+        Coupon.objects.filter(pk=coupon["id"]).update(used_count=F("used_count") + 1)
+    except Exception:
+        logger.exception("Could not record coupon usage for %s", payment.order_ref)
+
+
 def _process_checkout_payment(payment: CheckoutPayment):
     """Split the paid cart into SIM orders + BqOrders, then send receipt email.
     Idempotent — safe to call twice (webhook + confirm-poll can both land)."""
@@ -345,6 +419,9 @@ def _process_checkout_payment(payment: CheckoutPayment):
 
     payment.processed = True
     payment.save(update_fields=["processed"])
+
+    # Count the coupon as used only once the order is paid (limit / once per customer).
+    _record_coupon_usage(payment)
 
     # Send receipt email to customer
     _send_checkout_receipt(payment)
