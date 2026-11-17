@@ -27,6 +27,13 @@ class PlanCategory(models.Model):
 
 class Plan(models.Model):
 
+    class Audience(models.TextChoices):
+        # Who may see and buy the plan. Non-general plans are the discounted
+        # plans for verified customers and are hidden from the public listings.
+        GENERAL = "general", "Everyone"
+        PUBLIC_SECTOR = "public_sector", "Public sector workers (verified only)"
+        STUDENT = "student", "Students (verified only)"
+
     category = models.ForeignKey(
         PlanCategory,
         on_delete=models.SET_NULL,
@@ -109,6 +116,16 @@ class Plan(models.Model):
 
     is_popular = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    audience = models.CharField(
+        max_length=20,
+        choices=Audience.choices,
+        default=Audience.GENERAL,
+        db_index=True,
+        help_text=(
+            "Public sector and student plans are only listed on their own pages "
+            "and can only be bought by approved customers."
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 

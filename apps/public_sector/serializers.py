@@ -4,10 +4,7 @@ from datetime import date
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Nominee, PublicSectorRegistration
-
-
-MAX_NOMINEES = 5
+from .models import MAX_NOMINEES, Nominee, PublicSectorRegistration
 
 # Same rules as the frontend form
 NAME_RE = re.compile(r"^[a-zA-Z\s'\-.]+$")
@@ -49,13 +46,37 @@ def clean_text(value, label):
     return value
 
 
+def nominee_conflicts(nominee, own_emails, own_phone, seen_emails, seen_phones):
+    """Errors for one nominee that clashes with the applicant or another nominee.
+
+    `seen_emails` / `seen_phones` hold the nominees already added (emails
+    lower-cased, phones as digits only).
+    """
+    errors = {}
+    email = nominee["email"]
+    phone = digits_only(nominee["phone"])
+
+    if email in own_emails:
+        errors["email"] = ["A nominee's email can't be the same as your own."]
+    elif email in seen_emails:
+        errors["email"] = ["This email has already been added for another nominee."]
+
+    if phone == own_phone:
+        errors["phone"] = ["A nominee's phone number can't be the same as your own."]
+    elif phone in seen_phones:
+        errors["phone"] = ["This phone number has already been added for another nominee."]
+
+    return errors
+
+
 # ─── NOMINEE ─────────────────────────────────────────────────────────────────
 
 class NomineeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Nominee
-        fields = ["full_name", "email", "phone", "relationship"]
+        fields = ["id", "full_name", "email", "phone", "relationship", "created_at"]
+        read_only_fields = ["id", "created_at"]
 
     def validate_full_name(self, value):
         return clean_name(value)
@@ -183,23 +204,11 @@ class PublicSectorRegistrationSerializer(serializers.ModelSerializer):
             nominee_errors = []
 
             for nominee in nominees:
-                n_errors = {}
-                n_email = nominee["email"]
-                n_phone = digits_only(nominee["phone"])
-
-                if n_email in own_emails:
-                    n_errors["email"] = ["A nominee's email can't be the same as your own."]
-                elif n_email in seen_emails:
-                    n_errors["email"] = ["This email has already been added for another nominee."]
-
-                if n_phone == own_phone:
-                    n_errors["phone"] = ["A nominee's phone number can't be the same as your own."]
-                elif n_phone in seen_phones:
-                    n_errors["phone"] = ["This phone number has already been added for another nominee."]
-
-                seen_emails.add(n_email)
-                seen_phones.add(n_phone)
-                nominee_errors.append(n_errors)
+                nominee_errors.append(
+                    nominee_conflicts(nominee, own_emails, own_phone, seen_emails, seen_phones)
+                )
+                seen_emails.add(nominee["email"])
+                seen_phones.add(digits_only(nominee["phone"]))
 
             # Same shape DRF uses for nested lists: one dict per nominee, in order
             if any(nominee_errors):

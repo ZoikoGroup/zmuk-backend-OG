@@ -226,6 +226,9 @@ MEDIA_URL = "/media/"
 
 MEDIA_ROOT = BASE_DIR / "media"
 
+# Files that must never be served by URL (e.g. student ID documents).
+PRIVATE_MEDIA_ROOT = Path(os.getenv("PRIVATE_MEDIA_ROOT", BASE_DIR / "private_media"))
+
 # =============================================================================
 # CKEDITOR
 # =============================================================================
@@ -593,6 +596,11 @@ if USE_S3:
 
     AWS_STORAGE_BUCKET_NAME = os.getenv(
         "AWS_STORAGE_BUCKET_NAME"
+    )
+
+    # Optional separate bucket with no public access, for private documents.
+    AWS_PRIVATE_STORAGE_BUCKET_NAME = (
+        os.getenv("AWS_PRIVATE_STORAGE_BUCKET_NAME") or None
     )
 
     AWS_S3_ENDPOINT_URL = (

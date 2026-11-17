@@ -32,8 +32,11 @@ def global_search(request):
     # PLAN SEARCH
     # ========================
 
+    # Only plans the public plan pages show (no inactive or verified-only plans).
     plans = Plan.objects.filter(
-        Q(name__icontains=key)
+        Q(name__icontains=key),
+        is_active=True,
+        audience=Plan.Audience.GENERAL,
     )[:10]
 
     for plan in plans:
