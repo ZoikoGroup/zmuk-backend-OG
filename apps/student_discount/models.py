@@ -1,4 +1,8 @@
+from django.conf import settings
 from django.db import models
+from django.db.models import Q
+
+from .storage import private_document_storage, student_document_path
 
 
 class StudentDiscountApplication(models.Model):
@@ -8,7 +12,23 @@ class StudentDiscountApplication(models.Model):
         ("under_review", "Under Review"),
         ("approved", "Approved"),
         ("rejected", "Rejected"),
+        # Set automatically once an approved student's graduation date has passed.
+        ("expired", "Expired"),
     ]
+
+    # A user may only have one open application; after a rejection or
+    # expiry they can apply again.
+    OPEN_STATUSES = ("pending", "under_review", "approved")
+
+    # Null only for applications sent before login was required that
+    # couldn't be matched to an account.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="student_discount_applications",
+    )
 
     # ------------------------
     # Personal Information
@@ -53,11 +73,12 @@ class StudentDiscountApplication(models.Model):
     esim = models.BooleanField(default=False)
 
     # ------------------------
-    # Upload
+    # Upload (private: never served by URL, admins open it via the admin)
     # ------------------------
 
     student_id_document = models.FileField(
-        upload_to="student-discount/"
+        upload_to=student_document_path,
+        storage=private_document_storage,
     )
 
     # ------------------------
@@ -78,6 +99,13 @@ class StudentDiscountApplication(models.Model):
         default="pending",
     )
 
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    rejection_reason = models.TextField(
+        blank=True,
+        help_text="Shown to the student when the status is Rejected.",
+    )
+
     # ------------------------
     # Timestamps
     # ------------------------
@@ -94,6 +122,17 @@ class StudentDiscountApplication(models.Model):
         ordering = ["-created_at"]
         verbose_name = "Student Discount Application"
         verbose_name_plural = "Student Discount Applications"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=Q(status__in=["pending", "under_review", "approved"]),
+                name="student_discount_one_open_application_per_user",
+                violation_error_message=(
+                    "This student already has an open (pending, under review "
+                    "or approved) application."
+                ),
+            ),
+        ]
 
     def __str__(self):
         return f"{self.full_name} ({self.selected_plan})"

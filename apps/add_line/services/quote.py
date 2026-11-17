@@ -1,6 +1,7 @@
 """Price quote for one additional line (decisions Q4, A3, C11).
 
-* Every active plan and every term can be bought (Q4). Term prices are per
+* Every active plan and every term can be bought (Q4), except public sector
+  and student plans, which need an approved verification. Term prices are per
   month and picked the same way as the storefront: 24M → price_24,
   12M → price_12, 30D → price_30, falling back to `price`.
 * Prices are VAT-inclusive at the UK standard rate; VAT is shown, not added.
@@ -27,6 +28,7 @@ from django.utils import timezone
 
 from apps.coupons.models import Coupon
 from apps.coupons.services import validate_coupon
+from apps.plans.eligibility import NOT_ELIGIBLE_MESSAGES, can_purchase
 from apps.plans.models import Plan
 
 from ..models import SimType, Term
@@ -145,6 +147,9 @@ def build_quote(user, plan_id, term: str, sim_type: str, promo_code: str = "",
     # A plan without a Transatel package code can't be activated.
     if not plan or not plan.transatelID:
         raise QuoteError("PLAN_NOT_AVAILABLE", "This plan isn't available right now.")
+    # Public sector / student plans: only for customers whose verification is approved.
+    if not can_purchase(user, plan):
+        raise QuoteError("PLAN_NOT_ELIGIBLE", NOT_ELIGIBLE_MESSAGES[plan.audience])
 
     monthly = _monthly_price(plan, term)
     coupon, discount = None, Decimal("0.00")

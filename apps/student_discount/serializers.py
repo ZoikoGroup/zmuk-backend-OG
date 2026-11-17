@@ -4,13 +4,43 @@ import re
 from rest_framework import serializers
 
 from .models import StudentDiscountApplication
+from .services import public_status
 
 
 class StudentDiscountApplicationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StudentDiscountApplication
-        fields = "__all__"
+        # Listed explicitly so status/user/review fields can't be set by the client.
+        fields = [
+            "id",
+            "full_name",
+            "dob",
+            "email",
+            "mobile",
+            "institution",
+            "student_id_number",
+            "enrolment_status",
+            "graduation_date",
+            "selected_plan",
+            "contract_duration",
+            "roaming",
+            "wifi_calling",
+            "esim",
+            "student_id_document",
+            "signature",
+            "declaration_date",
+            "status",
+            "created_at",
+        ]
+        read_only_fields = ["id", "status", "created_at"]
+        # The document is private: accepted on upload, never returned.
+        extra_kwargs = {"student_id_document": {"write_only": True}}
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["status"] = public_status(instance.status)
+        return data
 
     def validate_mobile(self, value):
         pattern = r"^(\+44|0)7\d{9}$"

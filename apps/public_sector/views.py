@@ -2,19 +2,43 @@ import logging
 import threading
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import PublicSectorRegistration
-from .serializers import PublicSectorRegistrationSerializer
+from apps.plans.models import Plan
+from apps.plans.serializers import PlanSerializer
+
+from .models import MAX_NOMINEES, PublicSectorRegistration
+from .serializers import (
+    NomineeSerializer,
+    PublicSectorRegistrationSerializer,
+    digits_only,
+    nominee_conflicts,
+)
+from .services import current_registration, get_status
 
 
 logger = logging.getLogger(__name__)
+
+
+def _error(code, message, http_status, errors=None):
+    body = {"success": False, "code": code, "message": message}
+    if errors is not None:
+        body["errors"] = errors
+    return Response(body, status=http_status)
+
+
+def _in_background(func, *args):
+    # Starts only after the data is committed.
+    transaction.on_commit(
+        lambda: threading.Thread(target=func, args=args, daemon=True).start()
+    )
 
 
 # EMAIL FUNCTION
@@ -89,11 +113,16 @@ Please review this registration in the admin panel.
         )
 
 
-class PublicSectorRegistrationCreateView(APIView):
+# ─── REGISTRATION ────────────────────────────────────────────────────────────
 
-    # Public form: no login needed, and no session auth means no CSRF check
-    permission_classes = [AllowAny]
-    authentication_classes = []
+class PublicSectorRegistrationCreateView(APIView):
+    """POST /api/public-sector-workers/  (login required)
+
+    Saves the registration (with up to 5 nominees) against the logged-in user.
+    409 ALREADY_APPLIED if the user already has a pending or approved one.
+    """
+
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
 
@@ -101,25 +130,27 @@ class PublicSectorRegistrationCreateView(APIView):
 
         if not serializer.is_valid():
 
-            return Response(
-                {
-                    "success": False,
-                    "message": "Please fix the highlighted fields and try again.",
-                    "errors": serializer.errors,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            return _error(
+                "VALIDATION_ERROR",
+                "Please fix the highlighted fields and try again.",
+                status.HTTP_400_BAD_REQUEST,
+                serializer.errors,
             )
 
-        registration = serializer.save()
+        try:
+            with transaction.atomic():
+                # Lock the user so two submissions at once can't both pass the check.
+                get_user_model().objects.select_for_update().filter(pk=request.user.pk).first()
 
-        # BACKGROUND EMAIL THREAD (starts only after the data is committed)
-        transaction.on_commit(
-            lambda: threading.Thread(
-                target=send_registration_email,
-                args=[registration.pk],
-                daemon=True,
-            ).start()
-        )
+                if request.user.public_sector_registrations.filter(
+                    status__in=PublicSectorRegistration.OPEN_STATUSES
+                ).exists():
+                    return _already_applied()
+
+                registration = serializer.save(user=request.user)
+                _in_background(send_registration_email, registration.pk)
+        except IntegrityError:
+            return _already_applied()
 
         return Response(
             {
@@ -132,3 +163,155 @@ class PublicSectorRegistrationCreateView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+def _already_applied():
+    return _error(
+        "ALREADY_APPLIED",
+        "You already have a registration that is pending or approved.",
+        status.HTTP_409_CONFLICT,
+    )
+
+
+class MyVerificationStatusView(APIView):
+    """GET /api/public-sector-workers/me/
+
+    {status: none|pending|approved|rejected, application: {...} | null}
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"success": True, "data": get_status(request.user)})
+
+
+# ─── PLANS ───────────────────────────────────────────────────────────────────
+
+class PublicSectorPlansView(APIView):
+    """GET /api/public-sector-workers/plans/
+
+    Public sector plans for everyone; can_purchase is true only once the
+    logged-in user's registration is approved.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        verification = get_status(request.user)
+        plans = Plan.objects.filter(
+            is_active=True, audience=Plan.Audience.PUBLIC_SECTOR
+        ).select_related("category").prefetch_related("features")
+
+        return Response({
+            "success": True,
+            "data": {
+                "status": verification["status"],
+                "can_purchase": verification["status"] == PublicSectorRegistration.Status.APPROVED,
+                "plans": PlanSerializer(plans, many=True).data,
+            },
+        })
+
+
+# ─── NOMINEES ────────────────────────────────────────────────────────────────
+
+def _nominee_summary(registration, nominees):
+    used = len(nominees)
+    return {
+        "used": used,
+        "limit": MAX_NOMINEES,
+        "remaining": max(0, MAX_NOMINEES - used),
+        "can_add": (
+            registration.status in PublicSectorRegistration.OPEN_STATUSES
+            and used < MAX_NOMINEES
+        ),
+        "nominees": NomineeSerializer(nominees, many=True).data,
+    }
+
+
+class MyNomineesView(APIView):
+    """GET / POST /api/public-sector-workers/me/nominees/
+
+    GET:  {used, limit, remaining, can_add, nominees: [...]}
+    POST: {full_name, email, phone, relationship} adds one nominee while the
+          registration is pending or approved, up to 5 in total.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        registration = current_registration(request.user)
+        if registration is None:
+            return _no_registration()
+        return Response({
+            "success": True,
+            "data": _nominee_summary(registration, list(registration.nominees.all())),
+        })
+
+    def post(self, request):
+        serializer = NomineeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _error(
+                "VALIDATION_ERROR",
+                "Please fix the highlighted fields and try again.",
+                status.HTTP_400_BAD_REQUEST,
+                serializer.errors,
+            )
+
+        with transaction.atomic():
+            registration = current_registration(request.user)
+            if registration is None:
+                return _no_registration()
+            # Lock the registration so two requests at once can't pass the limit.
+            registration = PublicSectorRegistration.objects.select_for_update().get(
+                pk=registration.pk
+            )
+
+            if registration.status not in PublicSectorRegistration.OPEN_STATUSES:
+                return _error(
+                    "REGISTRATION_CLOSED",
+                    "Nominees can't be added to a rejected registration.",
+                    status.HTTP_409_CONFLICT,
+                )
+
+            existing = list(registration.nominees.all())
+            if len(existing) >= MAX_NOMINEES:
+                return _error(
+                    "NOMINEE_LIMIT_REACHED",
+                    f"You can nominate up to {MAX_NOMINEES} people.",
+                    status.HTTP_409_CONFLICT,
+                )
+
+            conflicts = nominee_conflicts(
+                serializer.validated_data,
+                own_emails={registration.email, registration.work_email},
+                own_phone=digits_only(registration.phone),
+                seen_emails={n.email for n in existing},
+                seen_phones={digits_only(n.phone) for n in existing},
+            )
+            if conflicts:
+                return _error(
+                    "VALIDATION_ERROR",
+                    "Please fix the highlighted fields and try again.",
+                    status.HTTP_400_BAD_REQUEST,
+                    conflicts,
+                )
+
+            nominee = serializer.save(registration=registration)
+            existing.append(nominee)
+
+        return Response(
+            {
+                "success": True,
+                "message": "Nominee added.",
+                "data": _nominee_summary(registration, existing),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+def _no_registration():
+    return _error(
+        "NO_REGISTRATION",
+        "You haven't sent a public sector registration yet.",
+        status.HTTP_404_NOT_FOUND,
+    )

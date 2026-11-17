@@ -1,4 +1,9 @@
+from django.conf import settings
 from django.db import models
+from django.db.models import Q
+
+
+MAX_NOMINEES = 5
 
 
 class PublicSectorRegistration(models.Model):
@@ -7,6 +12,19 @@ class PublicSectorRegistration(models.Model):
         PENDING = "pending", "Pending"
         APPROVED = "approved", "Approved"
         REJECTED = "rejected", "Rejected"
+
+    # A user may only have one open application; after a rejection they can apply again.
+    OPEN_STATUSES = (Status.PENDING, Status.APPROVED)
+
+    # Null only for applications sent before login was required that
+    # couldn't be matched to an account.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="public_sector_registrations",
+    )
 
     # Personal details
     full_name = models.CharField(max_length=100)
@@ -32,6 +50,11 @@ class PublicSectorRegistration(models.Model):
         default=Status.PENDING,
     )
     email_sent = models.BooleanField(default=False)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(
+        blank=True,
+        help_text="Shown to the customer when the status is Rejected.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -40,6 +63,16 @@ class PublicSectorRegistration(models.Model):
         verbose_name = "Public Sector Registration"
         verbose_name_plural = "Public Sector Registrations"
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=Q(status__in=["pending", "approved"]),
+                name="public_sector_one_open_registration_per_user",
+                violation_error_message=(
+                    "This customer already has a pending or approved registration."
+                ),
+            ),
+        ]
 
     def __str__(self):
         return f"{self.full_name} ({self.email})"

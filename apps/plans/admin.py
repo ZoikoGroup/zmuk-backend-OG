@@ -20,10 +20,11 @@ class PlanAdmin(admin.ModelAdmin):
         "transatelID",      # ✅ show in listing
         "category",
         "final_price",
+        "audience",
         "is_active",
     )
 
-    list_filter = ("category", "is_active")
+    list_filter = ("category", "audience", "is_active")
     search_fields = ("name", "transatelID", "short_description")
 
     autocomplete_fields = ("category",)
@@ -56,7 +57,7 @@ class PlanAdmin(admin.ModelAdmin):
                     )
                 }),
                 ("Status", {
-                    "fields": ("is_popular", "is_active")
+                    "fields": ("audience", "is_popular", "is_active")
                 }),
             )
         }),
