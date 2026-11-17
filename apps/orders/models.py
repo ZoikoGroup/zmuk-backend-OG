@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 
@@ -28,6 +29,14 @@ class CheckoutPayment(models.Model):
     ]
 
     order_ref = models.CharField(max_length=24, unique=True, editable=False)
+    # The logged-in buyer (null for guest checkouts and older payments).
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="checkout_payments",
+    )
     stripe_payment_intent_id = models.CharField(max_length=255, blank=True, default="")
     email = models.EmailField(db_index=True, blank=True, default="")
     amount_pence = models.PositiveIntegerField()
