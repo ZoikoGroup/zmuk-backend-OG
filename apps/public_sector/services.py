@@ -1,15 +1,64 @@
-"""Public sector verification: the logged-in user's status and decision emails."""
+"""Public sector verification: status, the % discount offer and decision emails."""
 
 import logging
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.conf import settings
 from django.core.mail import send_mail
 
-from .models import PublicSectorRegistration
+from .models import PublicSectorOffer, PublicSectorRegistration
 
 logger = logging.getLogger(__name__)
 
 Status = PublicSectorRegistration.Status
+
+_PENNY = Decimal("0.01")
+NO_DISCOUNT = Decimal("0.00")
+
+
+# ─── OFFER (30% off selected normal plans for verified workers) ─────────────
+
+def active_offer():
+    """The live offer, or None when there's no offer or it's paused."""
+    return PublicSectorOffer.objects.filter(is_active=True).order_by("pk").first()
+
+
+def offer_plans(offer):
+    """Active plans covered by the offer (none when there's no offer)."""
+    from apps.plans.models import Plan
+
+    if offer is None:
+        return Plan.objects.none()
+    return offer.plans.filter(is_active=True, audience=Plan.Audience.GENERAL)
+
+
+def is_approved(user) -> bool:
+    return get_status(user)["status"] == Status.APPROVED
+
+
+def apply_discount(price, percent) -> Decimal:
+    """Price after `percent`% off, rounded to the nearest penny (half up)."""
+    price = Decimal(str(price))
+    return (price * (Decimal("100") - Decimal(str(percent))) / Decimal("100")).quantize(
+        _PENNY, rounding=ROUND_HALF_UP
+    )
+
+
+def offer_percent_for(user, plan, *, offer=None, approved=None) -> Decimal:
+    """The % off `plan` for this user: the offer % if they're approved and
+    the plan is in the offer, otherwise 0.
+
+    Pass `offer` / `approved` when pricing several lines, to look them up once.
+    """
+    if not user or not user.is_authenticated:
+        return NO_DISCOUNT
+    offer = active_offer() if offer is None else offer
+    if offer is None or not offer.is_active:
+        return NO_DISCOUNT
+    if not offer_plans(offer).filter(pk=plan.pk).exists():
+        return NO_DISCOUNT
+    approved = is_approved(user) if approved is None else approved
+    return offer.discount_percent if approved else NO_DISCOUNT
 
 
 def current_registration(user):

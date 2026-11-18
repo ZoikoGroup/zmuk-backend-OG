@@ -166,10 +166,7 @@ class PlansTests(Base):
             name="Student 10GB", price=Decimal("10"), price_24=Decimal("5"),
             duration_days=30, audience=Plan.Audience.STUDENT,
         )
-        Plan.objects.create(
-            name="Public 10GB", price=Decimal("10"), duration_days=30,
-            audience=Plan.Audience.PUBLIC_SECTOR,
-        )
+        Plan.objects.create(name="Everyday 10GB", price=Decimal("10"), duration_days=30)
 
     def test_anyone_sees_student_plans_without_purchase(self):
         data = APIClient().get(PLANS_URL).json()["data"]

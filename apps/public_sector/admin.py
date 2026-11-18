@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
 
-from .models import Nominee, PublicSectorRegistration
+from .models import Nominee, PublicSectorOffer, PublicSectorRegistration
 from .services import send_decision_email
 
 DECIDED = (PublicSectorRegistration.Status.APPROVED, PublicSectorRegistration.Status.REJECTED)
@@ -127,3 +127,27 @@ class PublicSectorRegistrationAdmin(admin.ModelAdmin):
                     target=send_decision_email, args=[obj.pk], daemon=True
                 ).start()
             )
+
+
+@admin.register(PublicSectorOffer)
+class PublicSectorOfferAdmin(admin.ModelAdmin):
+    """One offer row: the % and the normal plans it covers.
+
+    Verified public sector workers get this % off those plans at checkout.
+    Pause it with "Is active" rather than deleting it.
+    """
+
+    list_display = ("__str__", "plan_count", "is_active", "updated_at")
+    filter_horizontal = ("plans",)
+    fields = ("discount_percent", "plans", "is_active", "updated_at")
+    readonly_fields = ("updated_at",)
+
+    @admin.display(description="Plans")
+    def plan_count(self, obj):
+        return obj.plans.count()
+
+    def has_add_permission(self, request):
+        return not PublicSectorOffer.objects.exists() and super().has_add_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return False

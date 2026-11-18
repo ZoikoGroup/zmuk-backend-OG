@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
 
@@ -76,6 +79,42 @@ class PublicSectorRegistration(models.Model):
 
     def __str__(self):
         return f"{self.full_name} ({self.email})"
+
+
+class PublicSectorOffer(models.Model):
+    """The public sector discount: a percentage off selected normal plans.
+
+    Verified (approved) public sector workers get it automatically at
+    checkout on these plans, whichever page they buy from. It can't be
+    combined with a coupon. There is a single offer row.
+    """
+
+    discount_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("30.00"),
+        validators=[MinValueValidator(Decimal("0.01")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Percentage taken off the plan price, e.g. 30.",
+    )
+    plans = models.ManyToManyField(
+        "plans.Plan",
+        blank=True,
+        related_name="public_sector_offers",
+        limit_choices_to={"audience": "general"},
+        help_text="The normal plans shown on the public sector page that get the discount.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Untick to pause the discount (the page then shows normal prices).",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Public sector offer"
+        verbose_name_plural = "Public sector offer"
+
+    def __str__(self):
+        return f"{self.discount_percent.normalize():f}% off for verified public sector workers"
 
 
 class Nominee(models.Model):

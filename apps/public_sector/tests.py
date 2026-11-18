@@ -10,7 +10,7 @@ from rest_framework.test import APIClient
 from apps.plans.models import Plan
 
 from apps.public_sector.admin import PublicSectorRegistrationAdmin, RegistrationAdminForm
-from apps.public_sector.models import Nominee, PublicSectorRegistration
+from apps.public_sector.models import Nominee, PublicSectorOffer, PublicSectorRegistration
 
 User = get_user_model()
 
@@ -123,36 +123,63 @@ class StatusTests(Base):
 
 
 class PlansTests(Base):
+    """The offer covers selected normal plans; approved workers see 30% off."""
 
     def setUp(self):
         super().setUp()
-        for name, audience in (
-            ("Public 10GB", Plan.Audience.PUBLIC_SECTOR),
-            ("Student 10GB", Plan.Audience.STUDENT),
-            ("Everyday 10GB", Plan.Audience.GENERAL),
-        ):
-            Plan.objects.create(
-                name=name, price=Decimal("10"), price_24=Decimal("6"), price_12=Decimal("7"),
-                price_30=Decimal("8"), duration_days=30, audience=audience,
-            )
+        self.offer_plan = Plan.objects.create(
+            name="Max 30GB", price=Decimal("30.00"), price_24=Decimal("16.99"),
+            price_12=Decimal("28.34"), price_30=Decimal("29.50"), duration_days=30,
+        )
+        Plan.objects.create(name="Not in offer", price=Decimal("10"), duration_days=30)
+        self.offer = PublicSectorOffer.objects.get()  # created by the migration: 30%, active
+        self.offer.plans.add(self.offer_plan)
 
-    def test_anyone_sees_public_sector_plans_without_purchase(self):
+    def test_migration_created_the_30_percent_offer(self):
+        self.assertEqual(self.offer.discount_percent, Decimal("30.00"))
+        self.assertTrue(self.offer.is_active)
+
+    def test_anyone_sees_offer_plans_at_normal_price(self):
         data = APIClient().get(PLANS_URL).json()["data"]
         self.assertEqual(data["status"], "none")
-        self.assertFalse(data["can_purchase"])
-        self.assertEqual([p["name"] for p in data["plans"]], ["Public 10GB"])
-        self.assertEqual(data["plans"][0]["price_24"], "6.00")
+        self.assertEqual(data["discount_percent"], "30.00")
+        self.assertFalse(data["discount_applies"])
+        self.assertEqual([p["name"] for p in data["plans"]], ["Max 30GB"])
+        self.assertEqual(data["plans"][0]["price_24"], "16.99")
+        self.assertIsNone(data["plans"][0]["discounted_prices"])
 
-    def test_pending_cannot_purchase(self):
+    def test_pending_gets_no_discount(self):
         self.submit()
-        self.assertFalse(self.client.get(PLANS_URL).json()["data"]["can_purchase"])
+        data = self.client.get(PLANS_URL).json()["data"]
+        self.assertFalse(data["discount_applies"])
+        self.assertIsNone(data["plans"][0]["discounted_prices"])
 
-    def test_approved_can_purchase(self):
+    def test_approved_sees_30_percent_off_rounded_to_the_penny(self):
         self.submit()
         PublicSectorRegistration.objects.update(status="approved")
         data = self.client.get(PLANS_URL).json()["data"]
-        self.assertEqual(data["status"], "approved")
+        self.assertTrue(data["discount_applies"])
         self.assertTrue(data["can_purchase"])
+        self.assertEqual(data["plans"][0]["discounted_prices"], {
+            "price_24": "11.89",   # 16.99 × 0.7 = 11.893
+            "price_12": "19.84",   # 28.34 × 0.7 = 19.838
+            "price_30": "20.65",
+            "price": "21.00",
+        })
+
+    def test_paused_offer_shows_no_plans_or_discount(self):
+        self.offer.is_active = False
+        self.offer.save()
+        self.submit()
+        PublicSectorRegistration.objects.update(status="approved")
+        data = self.client.get(PLANS_URL).json()["data"]
+        self.assertFalse(data["discount_applies"])
+        self.assertEqual(data["plans"], [])
+
+    def test_inactive_plan_left_out(self):
+        self.offer_plan.is_active = False
+        self.offer_plan.save()
+        self.assertEqual(APIClient().get(PLANS_URL).json()["data"]["plans"], [])
 
 
 class NomineeTests(Base):

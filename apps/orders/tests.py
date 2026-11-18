@@ -14,7 +14,7 @@ from apps.orders.models import CheckoutPayment
 from apps.orders.views import _process_checkout_payment
 from apps.plans.models import Plan
 from apps.products.models import Product, ProductVariant
-from apps.public_sector.models import PublicSectorRegistration
+from apps.public_sector.models import PublicSectorOffer, PublicSectorRegistration
 from apps.student_discount.models import StudentDiscountApplication
 
 User = get_user_model()
@@ -170,7 +170,6 @@ class EligibilityTests(Base):
     def setUp(self):
         super().setUp()
         self.student_plan = make_plan("Student 10GB", Plan.Audience.STUDENT, price_24=Decimal("5.00"))
-        self.public_plan = make_plan("Public 10GB", Plan.Audience.PUBLIC_SECTOR, price_24=Decimal("6.00"))
 
     def approve_student(self, graduation_date=None):
         return StudentDiscountApplication.objects.create(
@@ -205,19 +204,92 @@ class EligibilityTests(Base):
         res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5), login=True)
         self.assertEqual(res.json()["code"], "PLAN_NOT_ELIGIBLE")
 
-    def test_student_approval_does_not_unlock_public_sector(self):
-        self.approve_student()
-        res = self.post(body([plan_line(self.public_plan, 730, "6.00")], 6), login=True)
+    def test_public_sector_approval_does_not_unlock_student_plans(self):
+        make_registration(self.user, "approved")
+        res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5), login=True)
         self.assertEqual(res.json()["code"], "PLAN_NOT_ELIGIBLE")
 
-    def test_approved_public_sector_worker_can_buy(self):
-        PublicSectorRegistration.objects.create(
-            user=self.user, full_name="Bo", email="buyer@example.com", phone="07123 456789",
-            date_of_birth="1990-01-01", employer_name="NHS", job_title="Nurse",
-            work_email="bo@nhs.example", department="Ward", agree_terms=True,
-            is_public_sector_worker=True, confirm_accurate=True, status="approved",
+
+def make_registration(user, status):
+    return PublicSectorRegistration.objects.create(
+        user=user, full_name="Bo", email="buyer@example.com", phone="07123 456789",
+        date_of_birth="1990-01-01", employer_name="NHS", job_title="Nurse",
+        work_email="bo@nhs.example", department="Ward", agree_terms=True,
+        is_public_sector_worker=True, confirm_accurate=True, status=status,
+    )
+
+
+class PublicSectorDiscountTests(Base):
+    """30% off offer plans for approved workers, automatically, no coupon on top."""
+
+    def setUp(self):
+        super().setUp()
+        self.offer_plan = make_plan(
+            "Max 30GB", price=Decimal("30.00"), price_24=Decimal("16.99"),
+            price_12=Decimal("28.34"), price_30=Decimal("29.50"),
         )
-        res = self.post(body([plan_line(self.public_plan, 730, "6.00")], 6), login=True)
+        self.offer = PublicSectorOffer.objects.get()  # from the migration: 30%, active
+        self.offer.plans.add(self.offer_plan)
+
+    def test_approved_worker_pays_30_percent_less(self):
+        make_registration(self.user, "approved")
+        res = self.post(body([plan_line(self.offer_plan, 730, "11.89")], "11.89"), login=True)
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()["totals"]["public_sector_discount"], "5.10")
+
+        payment = CheckoutPayment.objects.get()
+        self.assertEqual(payment.amount_pence, 1189)
+        line = payment.payload["cart"][0]
+        self.assertEqual((line["price"], line["list_price"], line["discount_percent"]),
+                         (11.89, 16.99, "30.00"))
+
+    def test_rounding_is_per_unit_then_times_quantity(self):
+        make_registration(self.user, "approved")
+        res = self.post(body([plan_line(self.offer_plan, 365, "19.84", quantity=2)], "39.68"), login=True)
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_approved_worker_sending_normal_price_gets_price_changed(self):
+        make_registration(self.user, "approved")
+        res = self.post(body([plan_line(self.offer_plan, 730, "16.99")], "16.99"), login=True)
+        self.assertEqual(res.json()["code"], "PRICE_CHANGED")
+        line = res.json()["lines"][0]
+        self.assertEqual((line["list_price"], line["discount_percent"], line["unit_price"]),
+                         ("16.99", "30.00", "11.89"))
+
+    def test_no_discount_for_guest_pending_or_paused_offer(self):
+        cases = [("guest", None, False), ("pending", "pending", True), ("rejected", "rejected", True)]
+        for label, status, login in cases:
+            with self.subTest(label):
+                PublicSectorRegistration.objects.all().delete()
+                if status:
+                    make_registration(self.user, status)
+                res = self.post(body([plan_line(self.offer_plan, 730, "16.99")], "16.99"), login=login)
+                self.assertEqual(res.status_code, 200, res.content)
+
+        PublicSectorRegistration.objects.all().delete()
+        make_registration(self.user, "approved")
+        self.offer.is_active = False
+        self.offer.save()
+        res = self.post(body([plan_line(self.offer_plan, 730, "16.99")], "16.99"), login=True)
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_plan_outside_the_offer_keeps_its_price(self):
+        make_registration(self.user, "approved")
+        res = self.post(body([plan_line(self.plan, 730, "8.00")], "8.00"), login=True)
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()["totals"]["public_sector_discount"], "0.00")
+
+    def test_coupon_not_combinable_with_the_discount(self):
+        Coupon.objects.create(name="SAVE10", slug="SAVE10", type=Coupon.PERCENTAGE, discount=Decimal("10"))
+        make_registration(self.user, "approved")
+        res = self.post(
+            body([plan_line(self.offer_plan, 730, "11.89")], "10.70", couponCode="SAVE10"), login=True
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["code"], "COUPON_NOT_COMBINABLE")
+
+        # A cart with no discounted plan can still use the coupon.
+        res = self.post(body([plan_line(self.plan, 730, "8.00")], "7.20", couponCode="SAVE10"), login=True)
         self.assertEqual(res.status_code, 200, res.content)
 
 
@@ -234,7 +306,8 @@ class CouponTests(Base):
         res = self.post(body(cart, "25.20", couponCode="save10"), login=True)
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(res.json()["totals"], {
-            "subtotal": "28.00", "discount": "2.80", "shipping": "0.00", "total": "25.20",
+            "subtotal": "28.00", "discount": "2.80", "public_sector_discount": "0.00",
+            "shipping": "0.00", "total": "25.20",
         })
         self.assertEqual(CheckoutPayment.objects.get().payload["coupon"]["code"], "SAVE10")
 
