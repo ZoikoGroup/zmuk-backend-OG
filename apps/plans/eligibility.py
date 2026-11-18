@@ -1,8 +1,11 @@
-"""Who may buy a verified-only plan (public sector / student).
+"""Who may buy a verified-only plan (student plans).
 
 `can_purchase` is the single check used wherever a plan is priced on the
-server (add-line and Switch & Save quotes today, the cart checkout later).
-The approval rules themselves live in each module's `services.get_status`.
+server (cart checkout, add-line and Switch & Save quotes). The approval rules
+themselves live in each module's `services.get_status`.
+
+Public sector workers don't have their own plans: they buy normal plans and
+get a percentage off at checkout (apps.public_sector.services.offer_percent_for).
 """
 
 from collections import defaultdict
@@ -10,9 +13,6 @@ from collections import defaultdict
 from .models import Plan
 
 NOT_ELIGIBLE_MESSAGES = {
-    Plan.Audience.PUBLIC_SECTOR: (
-        "This plan is only available to verified public sector workers."
-    ),
     Plan.Audience.STUDENT: "This plan is only available to verified students.",
 }
 
@@ -22,9 +22,7 @@ def audience_status(user, audience: str) -> str:
     if not user or not user.is_authenticated:
         return "none"
     # Imported here so the plans app doesn't depend on the modules at load time.
-    if audience == Plan.Audience.PUBLIC_SECTOR:
-        from apps.public_sector.services import get_status
-    elif audience == Plan.Audience.STUDENT:
+    if audience == Plan.Audience.STUDENT:
         from apps.student_discount.services import get_status
     else:
         return "none"

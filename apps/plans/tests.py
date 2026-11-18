@@ -56,7 +56,6 @@ class PublicPlanListingTests(TestCase):
         self.category = PlanCategory.objects.create(name="SIM only")
         self.general = make_plan("Everyday 10GB", category=self.category)
         self.student = make_plan("Student 10GB", Plan.Audience.STUDENT, category=self.category)
-        self.public = make_plan("Public 10GB", Plan.Audience.PUBLIC_SECTOR, category=self.category)
 
     def test_existing_plans_default_to_general(self):
         plan = Plan.objects.create(name="Old", price=Decimal("5"), duration_days=30)
@@ -73,7 +72,6 @@ class PublicPlanListingTests(TestCase):
     def test_detail_hides_verified_only_plans(self):
         self.assertEqual(self.client.get(f"/api/plans/v1/{self.general.slug}/").status_code, 200)
         self.assertEqual(self.client.get(f"/api/plans/v1/{self.student.slug}/").status_code, 404)
-        self.assertEqual(self.client.get(f"/api/plans/v1/{self.public.slug}/").status_code, 404)
 
     def test_search_only_has_active_general_plans(self):
         make_plan("Inactive 10GB", is_active=False)
@@ -87,21 +85,23 @@ class CanPurchaseTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("buyer", "buyer@example.com", "pw")
         self.general = make_plan("Everyday")
-        self.public = make_plan("Public", Plan.Audience.PUBLIC_SECTOR)
         self.student = make_plan("Student", Plan.Audience.STUDENT)
 
     def test_general_plan_for_anyone(self):
         self.assertTrue(can_purchase(None, self.general))
 
-    def test_verified_plans_need_approval(self):
-        self.assertFalse(can_purchase(None, self.public))
-        self.assertFalse(can_purchase(self.user, self.public))
-        make_registration(self.user, status="pending")
-        self.assertFalse(can_purchase(self.user, self.public))
+    def test_student_plans_need_approval(self):
+        self.assertFalse(can_purchase(None, self.student))
+        self.assertFalse(can_purchase(self.user, self.student))
+        make_application(self.user, status="pending")
+        self.assertFalse(can_purchase(self.user, self.student))
 
-    def test_approved_public_sector_worker(self):
+    def test_approved_student(self):
+        make_application(self.user, status="approved")
+        self.assertTrue(can_purchase(self.user, self.student))
+
+    def test_public_sector_approval_does_not_unlock_student_plans(self):
         make_registration(self.user, status="approved")
-        self.assertTrue(can_purchase(self.user, self.public))
         self.assertFalse(can_purchase(self.user, self.student))
 
     def test_student_approval_lapses_after_graduation(self):

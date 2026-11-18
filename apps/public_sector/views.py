@@ -1,5 +1,6 @@
 import logging
 import threading
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -11,7 +12,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.plans.models import Plan
 from apps.plans.serializers import PlanSerializer
 
 from .models import MAX_NOMINEES, PublicSectorRegistration
@@ -21,7 +21,7 @@ from .serializers import (
     digits_only,
     nominee_conflicts,
 )
-from .services import current_registration, get_status
+from .services import active_offer, apply_discount, current_registration, get_status, offer_plans
 
 
 logger = logging.getLogger(__name__)
@@ -187,27 +187,54 @@ class MyVerificationStatusView(APIView):
 
 # ─── PLANS ───────────────────────────────────────────────────────────────────
 
+_TERM_PRICE_FIELDS = ("price_24", "price_12", "price_30", "price")
+
+
 class PublicSectorPlansView(APIView):
     """GET /api/public-sector-workers/plans/
 
-    Public sector plans for everyone; can_purchase is true only once the
-    logged-in user's registration is approved.
+    The normal plans covered by the public sector offer, with their normal
+    prices. Once the logged-in user's registration is approved, each plan
+    also has `discounted_prices` (the offer % off every term price), which
+    is what checkout will charge them.
     """
 
     permission_classes = [AllowAny]
 
     def get(self, request):
         verification = get_status(request.user)
-        plans = Plan.objects.filter(
-            is_active=True, audience=Plan.Audience.PUBLIC_SECTOR
-        ).select_related("category").prefetch_related("features")
+        offer = active_offer()
+        approved = verification["status"] == PublicSectorRegistration.Status.APPROVED
+        discount_applies = approved and offer is not None
+        percent = offer.discount_percent if offer else Decimal("0")
+
+        plans = (
+            offer_plans(offer).select_related("category").prefetch_related("features")
+        )
+        data = PlanSerializer(plans, many=True).data
+        for plan_data in data:
+            plan_data["discounted_prices"] = (
+                {
+                    field: (
+                        str(apply_discount(plan_data[field], percent))
+                        if plan_data[field] is not None
+                        else None
+                    )
+                    for field in _TERM_PRICE_FIELDS
+                }
+                if discount_applies
+                else None
+            )
 
         return Response({
             "success": True,
             "data": {
                 "status": verification["status"],
-                "can_purchase": verification["status"] == PublicSectorRegistration.Status.APPROVED,
-                "plans": PlanSerializer(plans, many=True).data,
+                "discount_percent": f"{percent:.2f}",
+                # True when this user gets the discount at checkout.
+                "discount_applies": discount_applies,
+                "can_purchase": discount_applies,  # kept for older builds; same as discount_applies
+                "plans": data,
             },
         })
 

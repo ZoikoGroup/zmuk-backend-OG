@@ -6,12 +6,16 @@ the coupon discount and the total are worked out here from the database:
 * Plan lines (`id` = plan id): the price is picked by the line's `duration`
   in days: 730 → price_24, 365 → price_12, 30 → price_30, otherwise `price`
   (also when that term price is empty). Inactive or unknown plans are refused.
-* Public sector / student plans: only for logged-in customers whose
-  verification is approved (`apps.plans.eligibility.can_purchase`).
+* Student plans: only for logged-in students whose verification is
+  approved (`apps.plans.eligibility.can_purchase`).
+* Public sector offer: an approved public sector worker automatically gets
+  the offer % (30) off every plan covered by the offer, whichever page the
+  plan came from. Unit price = term price minus the %, rounded to the penny.
 * Product lines (`type` "product", `id` = product variant id): the variant's price.
 * Coupon (by code): applies to the whole cart, needs login, and its
   restrictions are enforced: status/dates/usage limit, assigned users,
   once per customer, and assigned plans (every line must be one of them).
+  A coupon can't be combined with the public sector discount.
 
 The caller compares our total with the one the customer saw and refuses
 the payment if they differ (PRICE_CHANGED).
@@ -27,8 +31,10 @@ from apps.coupons.services import validate_coupon
 from apps.plans.eligibility import NOT_ELIGIBLE_MESSAGES, can_purchase
 from apps.plans.models import Plan
 from apps.products.models import ProductVariant
+from apps.public_sector.services import active_offer, apply_discount, is_approved, offer_plans
 
 PENNY = Decimal("0.01")
+ZERO = Decimal("0.00")
 
 # Term (days, as the storefront sends it) → plan price field.
 TERM_PRICE_FIELD = {730: "price_24", 365: "price_12", 30: "price_30"}
@@ -50,15 +56,17 @@ class CheckoutError(Exception):
 @dataclass
 class PricedCart:
     lines: list
-    subtotal: Decimal
-    discount: Decimal
+    subtotal: Decimal          # sum of the lines (public sector discount already taken off)
+    discount: Decimal          # coupon discount
     total: Decimal
     coupon: Coupon | None
+    public_sector_discount: Decimal = ZERO   # how much the public sector offer saved
 
     def totals(self) -> dict:
         return {
             "subtotal": str(self.subtotal),
             "discount": str(self.discount),
+            "public_sector_discount": str(self.public_sector_discount),
             "shipping": "0.00",
             "total": str(self.total),
         }
@@ -72,6 +80,8 @@ class PricedCart:
                 "type": line["type"],
                 "name": line.get("title") or line.get("name") or "",
                 "quantity": line["quantity"],
+                "list_price": f"{Decimal(str(line.get('list_price', line['price']))):.2f}",
+                "discount_percent": line.get("discount_percent", "0.00"),
                 "unit_price": f"{Decimal(str(line['price'])):.2f}",
                 "line_total": f"{Decimal(str(line['price'])) * line['quantity']:.2f}",
             }
@@ -145,8 +155,13 @@ def price_cart(cart, user, coupon_code: str = "") -> PricedCart:
         .in_bulk(variant_ids)
     )
 
+    # Public sector offer: looked up once for the whole cart.
+    offer = active_offer() if buyer is not None else None
+    offer_plan_ids = set(offer_plans(offer).values_list("pk", flat=True)) if offer else set()
+    offer_approved = bool(offer_plan_ids) and is_approved(buyer)
+
     lines, cart_plans, has_products = [], [], False
-    subtotal = Decimal("0.00")
+    subtotal = public_sector_discount = ZERO
 
     for item in cart:
         quantity = _quantity(item)
@@ -176,7 +191,12 @@ def price_cart(cart, user, coupon_code: str = "") -> PricedCart:
                     "PLAN_NOT_ELIGIBLE", NOT_ELIGIBLE_MESSAGES[plan.audience], 403, item=item.get("cartKey")
                 )
             duration = _duration(item)
-            unit = plan_unit_price(plan, duration)
+            list_price = plan_unit_price(plan, duration)
+            percent = (
+                offer.discount_percent if offer_approved and plan.pk in offer_plan_ids else ZERO
+            )
+            unit = apply_discount(list_price, percent) if percent else list_price
+            public_sector_discount += (list_price - unit) * quantity
             # The Transatel package comes from our plan, never from the browser.
             line = {
                 **item,
@@ -184,6 +204,8 @@ def price_cart(cart, user, coupon_code: str = "") -> PricedCart:
                 "plan_id": plan.pk,
                 "duration": duration,
                 "transatelID": plan.transatelID or "",
+                "list_price": float(list_price),
+                "discount_percent": f"{percent:.2f}",
             }
             cart_plans.append(plan)
 
@@ -197,10 +219,19 @@ def price_cart(cart, user, coupon_code: str = "") -> PricedCart:
         lines.append(line)
         subtotal += line_total
 
-    coupon, discount = _apply_coupon(coupon_code, buyer, subtotal, cart_plans, has_products)
-    total = max(Decimal("0.00"), subtotal - discount)
+    if (coupon_code or "").strip() and public_sector_discount > 0:
+        raise CheckoutError(
+            "COUPON_NOT_COMBINABLE",
+            "Coupons can't be used together with your public sector discount.",
+        )
 
-    return PricedCart(lines=lines, subtotal=subtotal, discount=discount, total=total, coupon=coupon)
+    coupon, discount = _apply_coupon(coupon_code, buyer, subtotal, cart_plans, has_products)
+    total = max(ZERO, subtotal - discount)
+
+    return PricedCart(
+        lines=lines, subtotal=subtotal, discount=discount, total=total, coupon=coupon,
+        public_sector_discount=public_sector_discount,
+    )
 
 
 def _apply_coupon(code, buyer, subtotal: Decimal, cart_plans: list, has_products: bool):
