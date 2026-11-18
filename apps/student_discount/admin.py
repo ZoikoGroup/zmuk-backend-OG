@@ -12,7 +12,7 @@ from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
-from .models import StudentDiscountApplication
+from .models import StudentDiscountApplication, StudentOffer
 from .services import send_decision_email
 
 DECIDED = ("approved", "rejected")
@@ -155,3 +155,22 @@ class StudentDiscountAdmin(admin.ModelAdmin):
                     target=send_decision_email, args=[obj.pk], daemon=True
                 ).start()
             )
+
+
+@admin.register(StudentOffer)
+class StudentOfferAdmin(admin.ModelAdmin):
+    """One offer row: the % taken off every student plan (Audience = Students).
+
+    Verified students get it automatically at checkout. Pause it with
+    "Is active" rather than deleting it.
+    """
+
+    list_display = ("__str__", "is_active", "updated_at")
+    fields = ("discount_percent", "is_active", "updated_at")
+    readonly_fields = ("updated_at",)
+
+    def has_add_permission(self, request):
+        return not StudentOffer.objects.exists() and super().has_add_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return False

@@ -7,11 +7,11 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.add_line.services.quote import QuoteError, build_quote
+from apps.add_line.services.quote import build_quote
 from apps.public_sector.models import PublicSectorRegistration
 from apps.student_discount.models import StudentDiscountApplication
 
-from apps.plans.eligibility import can_purchase, link_applications_by_email
+from apps.plans.eligibility import apply_discount, discounted_prices, link_applications_by_email
 from apps.plans.models import Plan, PlanCategory
 
 User = get_user_model()
@@ -80,59 +80,38 @@ class PublicPlanListingTests(TestCase):
         self.assertEqual(titles, ["Everyday 10GB"])
 
 
-class CanPurchaseTests(TestCase):
+class DiscountHelperTests(TestCase):
+
+    def test_apply_discount_rounds_half_up_to_the_penny(self):
+        self.assertEqual(apply_discount("16.99", 30), Decimal("11.89"))   # 11.893
+        self.assertEqual(apply_discount("28.34", 30), Decimal("19.84"))   # 19.838
+        self.assertEqual(apply_discount("12.99", 20), Decimal("10.39"))   # 10.392
+        self.assertEqual(apply_discount("10.05", 50), Decimal("5.03"))    # 5.025 → up
+
+    def test_discounted_prices_keeps_empty_terms_empty(self):
+        data = {"price": "20.00", "price_24": "15.00", "price_12": None, "price_30": "18.00"}
+        self.assertEqual(discounted_prices(data, 20), {
+            "price_24": "12.00", "price_12": None, "price_30": "14.40", "price": "16.00",
+        })
+
+
+class QuoteTests(TestCase):
+    """Add-a-line and Switch & Save: every active plan at its normal price."""
 
     def setUp(self):
         self.user = User.objects.create_user("buyer", "buyer@example.com", "pw")
-        self.general = make_plan("Everyday")
         self.student = make_plan("Student", Plan.Audience.STUDENT)
 
-    def test_general_plan_for_anyone(self):
-        self.assertTrue(can_purchase(None, self.general))
-
-    def test_student_plans_need_approval(self):
-        self.assertFalse(can_purchase(None, self.student))
-        self.assertFalse(can_purchase(self.user, self.student))
-        make_application(self.user, status="pending")
-        self.assertFalse(can_purchase(self.user, self.student))
-
-    def test_approved_student(self):
-        make_application(self.user, status="approved")
-        self.assertTrue(can_purchase(self.user, self.student))
-
-    def test_public_sector_approval_does_not_unlock_student_plans(self):
-        make_registration(self.user, status="approved")
-        self.assertFalse(can_purchase(self.user, self.student))
-
-    def test_student_approval_lapses_after_graduation(self):
-        make_application(
-            self.user, status="approved",
-            graduation_date=timezone.localdate() - timedelta(days=1),
+    def test_anyone_can_quote_a_student_plan_at_normal_price(self):
+        self.assertEqual(
+            build_quote(None, self.student.pk, "12M", "esim", additional_line=False).monthly_price,
+            Decimal("9.00"),
         )
-        self.assertFalse(can_purchase(self.user, self.student))
+        self.assertEqual(build_quote(self.user, self.student.pk, "12M", "esim").monthly_price, Decimal("9.00"))
 
-
-class QuoteEligibilityTests(TestCase):
-    """Add-a-line and Switch & Save price plans with build_quote."""
-
-    def setUp(self):
-        self.user = User.objects.create_user("buyer", "buyer@example.com", "pw")
-        self.student = make_plan("Student", Plan.Audience.STUDENT)
-
-    def test_not_approved_is_refused(self):
-        with self.assertRaises(QuoteError) as ctx:
-            build_quote(self.user, self.student.pk, "12M", "esim")
-        self.assertEqual(ctx.exception.code, "PLAN_NOT_ELIGIBLE")
-
-    def test_guest_is_refused(self):
-        with self.assertRaises(QuoteError) as ctx:
-            build_quote(None, self.student.pk, "12M", "esim", additional_line=False)
-        self.assertEqual(ctx.exception.code, "PLAN_NOT_ELIGIBLE")
-
-    def test_approved_student_gets_a_quote(self):
+    def test_no_verified_discount_in_quotes(self):
         make_application(self.user, status="approved")
-        quote = build_quote(self.user, self.student.pk, "12M", "esim")
-        self.assertEqual(quote.monthly_price, Decimal("9.00"))
+        self.assertEqual(build_quote(self.user, self.student.pk, "12M", "esim").monthly_price, Decimal("9.00"))
 
     def test_general_plan_unchanged(self):
         general = make_plan("Everyday")

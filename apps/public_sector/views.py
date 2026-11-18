@@ -21,7 +21,9 @@ from .serializers import (
     digits_only,
     nominee_conflicts,
 )
-from .services import active_offer, apply_discount, current_registration, get_status, offer_plans
+from apps.plans.eligibility import discounted_prices
+
+from .services import active_offer, current_registration, get_status, offer_plans
 
 
 logger = logging.getLogger(__name__)
@@ -187,9 +189,6 @@ class MyVerificationStatusView(APIView):
 
 # ─── PLANS ───────────────────────────────────────────────────────────────────
 
-_TERM_PRICE_FIELDS = ("price_24", "price_12", "price_30", "price")
-
-
 class PublicSectorPlansView(APIView):
     """GET /api/public-sector-workers/plans/
 
@@ -214,16 +213,7 @@ class PublicSectorPlansView(APIView):
         data = PlanSerializer(plans, many=True).data
         for plan_data in data:
             plan_data["discounted_prices"] = (
-                {
-                    field: (
-                        str(apply_discount(plan_data[field], percent))
-                        if plan_data[field] is not None
-                        else None
-                    )
-                    for field in _TERM_PRICE_FIELDS
-                }
-                if discount_applies
-                else None
+                discounted_prices(plan_data, percent) if discount_applies else None
             )
 
         return Response({

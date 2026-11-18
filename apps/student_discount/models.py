@@ -1,8 +1,41 @@
+from decimal import Decimal
+
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
 
 from .storage import private_document_storage, student_document_path
+
+
+class StudentOffer(models.Model):
+    """The student discount: a percentage off every student plan.
+
+    Student plans are the plans with Audience = Students (shown on the
+    student page only). Anyone can buy them at the normal price; verified
+    (approved, not expired) students get this % off automatically at
+    checkout. It can't be combined with a coupon. There is a single row.
+    """
+
+    discount_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("20.00"),
+        validators=[MinValueValidator(Decimal("0.01")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Percentage taken off every student plan, e.g. 20.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Untick to pause the discount (student plans then sell at their normal price).",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Student offer"
+        verbose_name_plural = "Student offer"
+
+    def __str__(self):
+        return f"{self.discount_percent.normalize():f}% off student plans for verified students"
 
 
 class StudentDiscountApplication(models.Model):
