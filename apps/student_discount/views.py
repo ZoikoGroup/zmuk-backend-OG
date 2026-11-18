@@ -1,4 +1,5 @@
 import threading
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
@@ -8,12 +9,12 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.plans.models import Plan
+from apps.plans.eligibility import discounted_prices
 from apps.plans.serializers import PlanSerializer
 
 from .models import StudentDiscountApplication
 from .serializers import StudentDiscountApplicationSerializer
-from .services import expire_lapsed, get_status, send_received_emails
+from .services import active_offer, expire_lapsed, get_status, send_received_emails, student_plans
 
 
 def _already_applied():
@@ -94,23 +95,35 @@ class MyStudentStatusView(APIView):
 class StudentPlansView(APIView):
     """GET /api/student-discount/plans/
 
-    Student plans for everyone; can_purchase is true only while the
-    logged-in user's application is approved (and not expired).
+    The student plans (Audience = Students) with their normal prices; anyone
+    can buy them. Once the logged-in student is approved (and not expired),
+    each plan also has `discounted_prices` (the offer % off every term
+    price), which is what checkout will charge them.
     """
 
     permission_classes = [AllowAny]
 
     def get(self, request):
         verification = get_status(request.user)
-        plans = Plan.objects.filter(
-            is_active=True, audience=Plan.Audience.STUDENT
-        ).select_related("category").prefetch_related("features")
+        offer = active_offer()
+        discount_applies = verification["status"] == "approved" and offer is not None
+        percent = offer.discount_percent if offer else Decimal("0")
+
+        plans = student_plans().select_related("category").prefetch_related("features")
+        data = PlanSerializer(plans, many=True).data
+        for plan_data in data:
+            plan_data["discounted_prices"] = (
+                discounted_prices(plan_data, percent) if discount_applies else None
+            )
 
         return Response({
             "success": True,
             "data": {
                 "status": verification["status"],
-                "can_purchase": verification["status"] == "approved",
-                "plans": PlanSerializer(plans, many=True).data,
+                "discount_percent": f"{percent:.2f}",
+                # True when this student gets the discount at checkout.
+                "discount_applies": discount_applies,
+                "can_purchase": discount_applies,  # kept for older builds; same as discount_applies
+                "plans": data,
             },
         })

@@ -1,38 +1,43 @@
-"""Who may buy a verified-only plan (student plans).
+"""Verified-customer discounts (public sector and students), shared helpers.
 
-`can_purchase` is the single check used wherever a plan is priced on the
-server (cart checkout, add-line and Switch & Save quotes). The approval rules
-themselves live in each module's `services.get_status`.
+Anyone can buy any active plan at its normal price. Verified (approved)
+customers get a percentage off at checkout:
 
-Public sector workers don't have their own plans: they buy normal plans and
-get a percentage off at checkout (apps.public_sector.services.offer_percent_for).
+* public sector workers: the PublicSectorOffer % on the normal plans it covers;
+* students: the StudentOffer % on every student plan (audience "student",
+  which are only listed on the student page).
+
+Each module's `services` decides who is approved and which plans are covered;
+the rounding and the `discounted_prices` shape live here so pages and
+checkout always agree.
 """
 
 from collections import defaultdict
+from decimal import ROUND_HALF_UP, Decimal
 
-from .models import Plan
+_PENNY = Decimal("0.01")
 
-NOT_ELIGIBLE_MESSAGES = {
-    Plan.Audience.STUDENT: "This plan is only available to verified students.",
-}
-
-
-def audience_status(user, audience: str) -> str:
-    """The user's verification status for a plan audience ("none" if unknown)."""
-    if not user or not user.is_authenticated:
-        return "none"
-    # Imported here so the plans app doesn't depend on the modules at load time.
-    if audience == Plan.Audience.STUDENT:
-        from apps.student_discount.services import get_status
-    else:
-        return "none"
-    return get_status(user)["status"]
+TERM_PRICE_FIELDS = ("price_24", "price_12", "price_30", "price")
 
 
-def can_purchase(user, plan: Plan) -> bool:
-    if plan.audience == Plan.Audience.GENERAL:
-        return True
-    return audience_status(user, plan.audience) == "approved"
+def apply_discount(price, percent) -> Decimal:
+    """Price after `percent`% off, rounded to the nearest penny (half up)."""
+    price = Decimal(str(price))
+    return (price * (Decimal("100") - Decimal(str(percent))) / Decimal("100")).quantize(
+        _PENNY, rounding=ROUND_HALF_UP
+    )
+
+
+def discounted_prices(plan_data: dict, percent):
+    """`percent`% off each term price of a serialised plan (None stays None)."""
+    return {
+        field: (
+            str(apply_discount(plan_data[field], percent))
+            if plan_data.get(field) is not None
+            else None
+        )
+        for field in TERM_PRICE_FIELDS
+    }
 
 
 def link_applications_by_email(model, user_model, open_statuses) -> tuple[int, int]:

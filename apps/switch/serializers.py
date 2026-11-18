@@ -17,7 +17,6 @@ _PROVIDER_ALIASES = {"Other": "Other UK Provider"}
 
 _QUOTE_ERROR_FIELD = {
     "PLAN_NOT_AVAILABLE": "plan_id",
-    "PLAN_NOT_ELIGIBLE": "plan_id",
     "TERM_INVALID": "contract_term",
     "SIM_TYPE_INVALID": "sim_type",
 }

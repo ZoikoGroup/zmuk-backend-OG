@@ -18,7 +18,7 @@ from rest_framework.test import APIClient
 
 from apps.plans.models import Plan
 
-from apps.student_discount.models import StudentDiscountApplication
+from apps.student_discount.models import StudentDiscountApplication, StudentOffer
 
 User = get_user_model()
 
@@ -159,31 +159,63 @@ class StatusTests(Base):
 
 
 class PlansTests(Base):
+    """Student plans at normal price for everyone; 20% off once verified."""
 
     def setUp(self):
         super().setUp()
         Plan.objects.create(
-            name="Student 10GB", price=Decimal("10"), price_24=Decimal("5"),
-            duration_days=30, audience=Plan.Audience.STUDENT,
+            name="Student 30GB", price=Decimal("15.00"), price_24=Decimal("12.99"),
+            price_12=Decimal("14.00"), price_30=None, duration_days=30,
+            audience=Plan.Audience.STUDENT,
         )
         Plan.objects.create(name="Everyday 10GB", price=Decimal("10"), duration_days=30)
 
-    def test_anyone_sees_student_plans_without_purchase(self):
-        data = APIClient().get(PLANS_URL).json()["data"]
-        self.assertFalse(data["can_purchase"])
-        self.assertEqual([p["name"] for p in data["plans"]], ["Student 10GB"])
+    def get_data(self, client=None):
+        return (client or self.client).get(PLANS_URL).json()["data"]
 
-    def test_approved_can_purchase_until_expiry(self):
+    def approve(self):
         self.submit()
         StudentDiscountApplication.objects.update(status="approved")
-        self.assertTrue(self.client.get(PLANS_URL).json()["data"]["can_purchase"])
 
+    def test_migration_created_the_20_percent_offer(self):
+        offer = StudentOffer.objects.get()
+        self.assertEqual((offer.discount_percent, offer.is_active), (Decimal("20.00"), True))
+
+    def test_anyone_sees_student_plans_at_normal_price(self):
+        data = self.get_data(APIClient())
+        self.assertEqual(data["status"], "none")
+        self.assertEqual(data["discount_percent"], "20.00")
+        self.assertFalse(data["discount_applies"])
+        self.assertEqual([p["name"] for p in data["plans"]], ["Student 30GB"])
+        self.assertIsNone(data["plans"][0]["discounted_prices"])
+
+    def test_approved_sees_20_percent_off(self):
+        self.approve()
+        data = self.get_data()
+        self.assertTrue(data["discount_applies"])
+        self.assertEqual(data["plans"][0]["discounted_prices"], {
+            "price_24": "10.39",   # 12.99 × 0.8 = 10.392
+            "price_12": "11.20",
+            "price_30": None,
+            "price": "12.00",
+        })
+
+    def test_discount_ends_when_approval_expires(self):
+        self.approve()
         StudentDiscountApplication.objects.update(
             graduation_date=timezone.localdate() - timedelta(days=1)
         )
-        data = self.client.get(PLANS_URL).json()["data"]
+        data = self.get_data()
         self.assertEqual(data["status"], "expired")
-        self.assertFalse(data["can_purchase"])
+        self.assertFalse(data["discount_applies"])
+        self.assertIsNone(data["plans"][0]["discounted_prices"])
+
+    def test_paused_offer_keeps_plans_without_discount(self):
+        StudentOffer.objects.update(is_active=False)
+        self.approve()
+        data = self.get_data()
+        self.assertFalse(data["discount_applies"])
+        self.assertEqual(len(data["plans"]), 1)
 
 
 class AdminDocumentTests(Base):

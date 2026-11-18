@@ -1,4 +1,4 @@
-"""Student verification: the logged-in user's status, expiry and decision emails."""
+"""Student verification: status, expiry, the % discount offer and decision emails."""
 
 import logging
 
@@ -6,7 +6,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
 
-from .models import StudentDiscountApplication
+from .models import StudentDiscountApplication, StudentOffer
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,24 @@ EXPIRED = "expired"
 # The frontend sees: none / pending / approved / rejected / expired.
 # "Under review" is an admin-only step, so it is shown as pending.
 _PUBLIC_STATUS = {"under_review": "pending"}
+
+
+# ─── OFFER (20% off every student plan for verified students) ───────────────
+
+def active_offer():
+    """The live student offer, or None when there's no offer or it's paused."""
+    return StudentOffer.objects.filter(is_active=True).order_by("pk").first()
+
+
+def student_plans():
+    from apps.plans.models import Plan
+
+    return Plan.objects.filter(is_active=True, audience=Plan.Audience.STUDENT)
+
+
+def is_approved(user) -> bool:
+    """Approved and not past the graduation date (get_status expires it)."""
+    return get_status(user)["status"] == APPROVED
 
 
 def expire_lapsed(user=None) -> int:

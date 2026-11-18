@@ -15,7 +15,7 @@ from apps.orders.views import _process_checkout_payment
 from apps.plans.models import Plan
 from apps.products.models import Product, ProductVariant
 from apps.public_sector.models import PublicSectorOffer, PublicSectorRegistration
-from apps.student_discount.models import StudentDiscountApplication
+from apps.student_discount.models import StudentDiscountApplication, StudentOffer
 
 User = get_user_model()
 
@@ -165,11 +165,12 @@ class PricingTests(Base):
         self.assertEqual(res.json()["code"], "PRODUCT_NOT_AVAILABLE")
 
 
-class EligibilityTests(Base):
+class StudentDiscountTests(Base):
+    """Student plans: anyone can buy at normal price; verified students get 20% off."""
 
     def setUp(self):
         super().setUp()
-        self.student_plan = make_plan("Student 10GB", Plan.Audience.STUDENT, price_24=Decimal("5.00"))
+        self.student_plan = make_plan("Student 30GB", Plan.Audience.STUDENT, price_24=Decimal("12.99"))
 
     def approve_student(self, graduation_date=None):
         return StudentDiscountApplication.objects.create(
@@ -182,32 +183,54 @@ class EligibilityTests(Base):
             declaration_date=timezone.localdate(), status="approved",
         )
 
-    def test_guest_must_log_in(self):
-        res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5))
-        self.assertEqual(res.status_code, 401)
-        self.assertEqual(res.json()["code"], "LOGIN_REQUIRED")
+    def buy(self, price, login=True, **extra):
+        return self.post(body([plan_line(self.student_plan, 730, price)], price, **extra), login=login)
 
-    def test_not_approved_is_refused(self):
-        res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5), login=True)
-        self.assertEqual(res.status_code, 403)
-        self.assertEqual(res.json()["code"], "PLAN_NOT_ELIGIBLE")
-        self.assertIn("verified students", res.json()["message"])
+    def test_guest_and_unverified_pay_normal_price(self):
+        self.assertEqual(self.buy("12.99", login=False).status_code, 200)
+        self.assertEqual(self.buy("12.99").status_code, 200)
 
-    def test_approved_student_can_buy(self):
+    def test_approved_student_pays_20_percent_less(self):
         self.approve_student()
-        res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5), login=True)
+        res = self.buy("10.39")   # 12.99 × 0.8 = 10.392
         self.assertEqual(res.status_code, 200, res.content)
-        self.assertEqual(CheckoutPayment.objects.get().user, self.user)
+        self.assertEqual(res.json()["totals"]["student_discount"], "2.60")
+        self.assertEqual(res.json()["totals"]["public_sector_discount"], "0.00")
+        payment = CheckoutPayment.objects.get()
+        self.assertEqual((payment.user, payment.amount_pence), (self.user, 1039))
+        line = payment.payload["cart"][0]
+        self.assertEqual((line["discount_percent"], line["discount_programme"]), ("20.00", "student"))
 
-    def test_expired_student_is_refused(self):
+    def test_approved_student_sending_normal_price_gets_price_changed(self):
+        self.approve_student()
+        res = self.buy("12.99")
+        self.assertEqual(res.json()["code"], "PRICE_CHANGED")
+        self.assertEqual(res.json()["lines"][0]["unit_price"], "10.39")
+        self.assertEqual(res.json()["lines"][0]["discount_programme"], "student")
+
+    def test_expired_student_pays_normal_price(self):
         self.approve_student(graduation_date=timezone.localdate() - timedelta(days=1))
-        res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5), login=True)
-        self.assertEqual(res.json()["code"], "PLAN_NOT_ELIGIBLE")
+        self.assertEqual(self.buy("12.99").status_code, 200)
 
-    def test_public_sector_approval_does_not_unlock_student_plans(self):
+    def test_public_sector_approval_gives_no_student_discount(self):
         make_registration(self.user, "approved")
-        res = self.post(body([plan_line(self.student_plan, 730, "5.00")], 5), login=True)
-        self.assertEqual(res.json()["code"], "PLAN_NOT_ELIGIBLE")
+        self.assertEqual(self.buy("12.99").status_code, 200)
+
+    def test_paused_offer_means_normal_price(self):
+        StudentOffer.objects.update(is_active=False)
+        self.approve_student()
+        self.assertEqual(self.buy("12.99").status_code, 200)
+
+    def test_coupon_not_combinable_with_student_discount(self):
+        Coupon.objects.create(name="SAVE10", slug="SAVE10", type=Coupon.PERCENTAGE, discount=Decimal("10"))
+        self.approve_student()
+        res = self.buy("9.35", couponCode="SAVE10")
+        self.assertEqual(res.json()["code"], "COUPON_NOT_COMBINABLE")
+        self.assertIn("student discount", res.json()["message"])
+
+    def test_student_plans_still_hidden_from_public_listing(self):
+        names = [p["name"] for p in self.client.get("/api/plans/v1/").json()]
+        self.assertNotIn("Student 30GB", names)
 
 
 def make_registration(user, status):
@@ -306,7 +329,7 @@ class CouponTests(Base):
         res = self.post(body(cart, "25.20", couponCode="save10"), login=True)
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(res.json()["totals"], {
-            "subtotal": "28.00", "discount": "2.80", "public_sector_discount": "0.00",
+            "subtotal": "28.00", "discount": "2.80", "public_sector_discount": "0.00", "student_discount": "0.00",
             "shipping": "0.00", "total": "25.20",
         })
         self.assertEqual(CheckoutPayment.objects.get().payload["coupon"]["code"], "SAVE10")
