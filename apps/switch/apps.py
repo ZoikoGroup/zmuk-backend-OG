@@ -8,6 +8,7 @@ class SwitchConfig(AppConfig):
     verbose_name = "Number Switch"
 
     def ready(self):
+        from . import wording  # noqa: F401  (registers the consent wording check)
         from .conversion import connect
 
         connect()

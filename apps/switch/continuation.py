@@ -13,7 +13,8 @@ Why this is safe (decisions A1, M04 §04 and the 13 Nov engineering note):
   (SWITCH_CONTINUATION_TTL_HOURS) and a new link revokes older ones.
 * A request already owned by another account is never moved.
 
-Everything here is off while SWITCH_ORDER_CONVERSION_ENABLED is False.
+Everything here is off while SWITCH_ORDER_CONVERSION_ENABLED is False, and
+also while ADD_LINE_SUPPLIER_WRITES_ENABLED is False (see `enabled`).
 """
 
 import hashlib
@@ -69,8 +70,34 @@ RESEND_MESSAGE = (
 )
 
 
-def enabled() -> bool:
+def conversion_flag_on() -> bool:
     return bool(getattr(settings, "SWITCH_ORDER_CONVERSION_ENABLED", False))
+
+
+def supplier_writes_on() -> bool:
+    return bool(getattr(settings, "ADD_LINE_SUPPLIER_WRITES_ENABLED", False))
+
+
+def enabled() -> bool:
+    """Part B is open only when conversion is on AND the line can really be
+    activated (supplier writes on), unless Finance approved a time-limited
+    exception. Conversion ON with supplier writes OFF would take payment for
+    service that can't be provisioned (Engineering Decision v2.1 §04/§07)."""
+    if not conversion_flag_on():
+        return False
+    return supplier_writes_on() or bool(
+        getattr(settings, "SWITCH_ORDERS_WITHOUT_SUPPLIER_WRITES_APPROVED", False)
+    )
+
+
+def disabled_reason() -> str:
+    """For staff messages only."""
+    if not conversion_flag_on():
+        return "SWITCH_ORDER_CONVERSION_ENABLED is off"
+    if not enabled():
+        return ("ADD_LINE_SUPPLIER_WRITES_ENABLED is off (payment is never taken for a line that "
+                "can't be activated)")
+    return ""
 
 
 def _hash(raw_token: str) -> str:

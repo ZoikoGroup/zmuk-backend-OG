@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Switch Request Alert – Zoiko Mobile Ops</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+          <tr>
+            <td style="background:#b42318;padding:24px 40px;text-align:center;">
+              <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">{{ title }}</h1>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:32px 40px 24px;">
+              <p style="margin:0 0 20px;color:#444;font-size:15px;line-height:1.6;">{{ summary }}</p>
+
+              <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px;">
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;width:40%;border-bottom:1px solid #e9ecef;">Reference</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ reference }}</td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Plan</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ selected_plan }}{% if contract_term %} · {{ contract_term }}{% endif %}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;border-bottom:1px solid #e9ecef;">Internal reason</td>
+                  <td style="padding:10px 14px;color:#444;border-bottom:1px solid #e9ecef;">{{ fault }}</td>
+                </tr>
+                <tr style="background:#f8f9fa;">
+                  <td style="padding:10px 14px;font-weight:700;color:#0e1929;">What to do</td>
+                  <td style="padding:10px 14px;color:#444;">{{ next_step }}</td>
+                </tr>
+              </table>
+
+              <p style="margin:24px 0 0;color:#888;font-size:13px;">
+                <a href="{{ admin_url }}" style="color:#0e8f74;">Open {{ reference }} in the Django Admin</a>
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background:#f4f4f5;padding:20px 40px;text-align:center;">
+              <p style="margin:0;color:#aaa;font-size:12px;">Zoiko Mobile · Internal notification</p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

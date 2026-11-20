@@ -71,7 +71,10 @@ def on_line_created(sender, order, line, **kwargs):
         return
     try:
         code = pac.decrypt(switch.encrypted_code)
-        porting.create_request(order.owner, line, code_type=code_type, code=code, msisdn=switch.port_number)
+        # The code's 30-day life runs from when the request received it, not
+        # from now; porting re-checks it before anything is sent (C11).
+        porting.create_request(order.owner, line, code_type=code_type, code=code, msisdn=switch.port_number,
+                               code_received_at=switch.code_received_at)
     except (porting.PortError, pac.PacStorageUnavailable, pac.PacError, ValueError) as exc:
         logger.error("Handing %s to porting failed for %s: %s", code_type, switch.reference, exc)
         _note(switch, f"Could not start the {code_type} transfer automatically: {getattr(exc, 'code', exc)}.")

@@ -13,11 +13,13 @@ from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
+from apps.add_line.models import Term
 from apps.add_line.services.quote import QuoteError, build_quote
+from apps.plans.models import Plan
 
-from . import continuation, ordering, receipts, services
-from .emails import send_html_email as _send_html_email
-from .models import SwitchFeedback, SwitchRequest
+from . import continuation, documents, ordering, receipts, services, wording
+from .emails import ops_recipient, send_html_email as _send_html_email
+from .models import ContractTermRule, ContractTerms, PlanTariff, SwitchFeedback, SwitchRequest
 from .serializers import (
     ConsentSerializer,
     ContinuationTokenSerializer,
@@ -79,17 +81,11 @@ def _send_submission_emails(instance):
         context=ctx,
         recipient=instance.email,
     )
-    ops_email = (
-        getattr(settings, "SWITCH_OPS_EMAIL", None)
-        or getattr(settings, "BLOG_NOTIFICATION_ADMIN_EMAIL", None)
-        or getattr(settings, "DEFAULT_FROM_EMAIL", None)
-        or "info@zoikomobile.co.uk"
-    )
     _send_html_email(
         subject=f"New Switch Request {instance.reference} — {instance.get_status_display()}",
         template_name="emails/switch_request_ops.html",
         context=ctx,
-        recipient=ops_email,
+        recipient=ops_recipient(),
     )
 
 
@@ -414,7 +410,92 @@ class SwitchQuoteView(APIView):
                 "contract_version": settings.ADD_LINE_CONTRACT_VERSION,
                 "contract_summary_version": settings.ADD_LINE_CONTRACT_SUMMARY_VERSION,
             },
-            "consent_version": settings.SWITCH_CONSENT_VERSION,
+            # Step 4: show this exact sentence next to the one mandatory,
+            # unticked box, and send `consent_version` back with the request.
+            "consent_version": wording.consent_version(),
+            "consent_statement": wording.request_authorisation(),
+        })
+
+
+# ── Published contract content (one source of truth, v2.3 §5) ─────────────────
+
+class ContractContentThrottle(_IPThrottle):
+    scope = "switch_contract_content"
+    rate = "120/hour"
+
+
+CONTRACT_CONTENT_UNAVAILABLE = "Our contract information isn't available online right now. Please contact us."
+
+
+def _public_terms(terms) -> dict:
+    """Customer-facing wording only. Approval evidence (references, owners,
+    file names, checksums, storage location) stays internal."""
+    return {
+        "version": terms.version,
+        "effective_from": terms.effective_from,
+        "issuer": {f: getattr(terms, f) for f in ContractTerms.TEXT_FIELDS[:6]},
+        "terms": {f: getattr(terms, f) for f in ContractTerms.TEXT_FIELDS[6:]},
+        "term_rules": {
+            rule.term: {f: getattr(rule, f) for f in ContractTermRule.TEXT_FIELDS}
+            for rule in terms.term_rules.all()
+        },
+    }
+
+
+def _public_tariff(tariff) -> dict:
+    return {
+        "version": tariff.version,
+        "effective_from": tariff.effective_from,
+        **{f: getattr(tariff, f) for f in PlanTariff.TEXT_FIELDS},
+        "rollover_applies": tariff.rollover_applies,
+        "price_changes_apply": tariff.price_changes_apply,
+        "price_changes": [
+            {"term": c.term or None, "effective_date": c.effective_date, "new_price": str(c.new_price)}
+            for c in tariff.price_changes.all()
+        ],
+    }
+
+
+class ContractTermsView(APIView):
+    """GET /api/v1/switch/contract-terms/
+
+    The published, in-effect general contract wording (Legal). The website
+    shows this instead of any copy of its own. 404 NOT_AVAILABLE when nothing
+    is published: hide contract links rather than showing a draft.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ContractContentThrottle]
+
+    def get(self, request):
+        terms = ContractTerms.current()
+        if terms is None:
+            return _fail(CONTRACT_CONTENT_UNAVAILABLE, status.HTTP_404_NOT_FOUND, code="NOT_AVAILABLE")
+        return _ok("Contract terms.", _public_terms(terms))
+
+
+class PlanContractView(APIView):
+    """GET /api/v1/switch/plans/<plan_id>/contract/
+
+    Whether a plan can be represented accurately right now: its published
+    tariff facts and, per plan length, whether complete contract documents
+    could be issued (`ready_terms`). `contract_ready` is false when no plan
+    length is ready; Product decides whether the site hides such a plan.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ContractContentThrottle]
+
+    def get(self, request, plan_id):
+        if not Plan.objects.filter(pk=plan_id, is_active=True).exists():
+            return _fail("We couldn't find that plan.", status.HTTP_404_NOT_FOUND, code="PLAN_NOT_FOUND")
+        tariff = PlanTariff.current(plan_id)
+        ready = [term for term in Term.values if documents.contract_ready(plan_id, term)]
+        return _ok("Plan contract information.", {
+            "plan_id": plan_id,
+            "contract_ready": bool(ready),
+            "ready_terms": ready,
+            "tariff": _public_tariff(tariff) if tariff else None,
         })
 
 
@@ -565,7 +646,10 @@ class ContractDocumentDownloadView(APIView):
     def get(self, request, reference, document_id):
         try:
             switch = ordering.get_owned(reference, request.user)
-            doc = ordering.get_document(switch, request.user, document_id)
+            doc = ordering.get_document(
+                switch, request.user, document_id,
+                ip_address=request.META.get("REMOTE_ADDR"), user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            )
         except ordering.OrderError as exc:
             return _order_fail(exc)
         response = HttpResponse(bytes(doc.pdf), content_type=ordering.PDF)

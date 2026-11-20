@@ -6,7 +6,7 @@ from rest_framework import serializers
 from apps.add_line.models import SimType, Term
 from apps.add_line.services.quote import QuoteError, build_quote
 
-from . import services
+from . import services, wording
 from .models import SwitchFeedback, SwitchRequest
 
 # UK mobile: 07xxxxxxxxx or +447xxxxxxxxx
@@ -24,7 +24,7 @@ _QUOTE_ERROR_FIELD = {
 
 def consent_version() -> str:
     """Version of the Step 4 authorisation wording the customer agrees to."""
-    return settings.SWITCH_CONSENT_VERSION
+    return wording.consent_version()
 
 
 # ── Status views ──────────────────────────────────────────────────────────────
@@ -264,25 +264,17 @@ class SwitchRequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Data allowance cannot be negative.")
         return value
 
-    # ── Authorisation: each box must be ticked ────────────────────────────
+    # ── Authorisation (v2.3 §4) ───────────────────────────────────────────
+    # One mandatory, unticked-by-default box: the switching authorisation
+    # (`consent_statement` from the quote). Step 4 is a request, so it must
+    # not ask the customer to accept contract terms or claim they read
+    # documents; that happens in Part B. `timeline_acknowledged` and
+    # `terms_accepted` are still stored if an older form sends them, but
+    # they are no longer required.
     def validate_transfer_authorised(self, value):
         if not value:
             raise serializers.ValidationError(
-                "You must authorise us to process this switching request."
-            )
-        return value
-
-    def validate_timeline_acknowledged(self, value):
-        if not value:
-            raise serializers.ValidationError(
-                "You must acknowledge the switch timeline."
-            )
-        return value
-
-    def validate_terms_accepted(self, value):
-        if not value:
-            raise serializers.ValidationError(
-                "You must agree to the Privacy Policy and Terms & Conditions."
+                "Please tick the box to authorise us to process your switching request."
             )
         return value
 
@@ -378,6 +370,7 @@ class SwitchRequestSerializer(serializers.ModelSerializer):
             },
             quote_hash=quote.hash,
             consent_version=consent_version(),
+            consent_statement=wording.request_authorisation(),
             consented_at=timezone.now(),
             consent_ip=meta.get("REMOTE_ADDR") or None,
             consent_user_agent=(meta.get("HTTP_USER_AGENT") or "")[:255],

@@ -16,6 +16,7 @@ Follows the CTO Milestone 04 decision (12 Nov 2026, option (c)):
 """
 
 import hashlib
+import re
 import secrets
 import uuid
 
@@ -63,6 +64,9 @@ class SwitchRequest(models.Model):
         ELIGIBILITY = "eligibility", "Eligibility check"
         IDENTITY = "identity", "Identity / ownership check"
         DUPLICATE = "duplicate", "Possible duplicate request"
+        # Approved contract terms / tariff missing or unusable (Engineering
+        # Decision v2.1 §04). Always internal: Legal/Product fix the content.
+        CONTRACT_DOCS = "contract_docs", "Contract documents unavailable"
         OTHER = "other", "Other"
 
     # Reasons the customer resolves by sending a (new) PAC/STAC.
@@ -83,6 +87,7 @@ class SwitchRequest(models.Model):
         ActionReason.ELIGIBILITY: ActionOwner.OPERATIONS,
         ActionReason.IDENTITY: ActionOwner.OPERATIONS,
         ActionReason.DUPLICATE: ActionOwner.OPERATIONS,
+        ActionReason.CONTRACT_DOCS: ActionOwner.OPERATIONS,
         ActionReason.OTHER: ActionOwner.OPERATIONS,
     }
 
@@ -192,6 +197,9 @@ class SwitchRequest(models.Model):
     timeline_acknowledged = models.BooleanField(default=False)
     terms_accepted = models.BooleanField(default=False)
     consent_version = models.CharField(max_length=32, blank=True, editable=False)
+    # The exact Step 4 sentence the customer ticked (blank on requests made
+    # before 20 Nov 2026, when only the version was kept).
+    consent_statement = models.TextField(blank=True, editable=False)
     consented_at = models.DateTimeField(null=True, blank=True, editable=False)
     consent_ip = models.GenericIPAddressField(null=True, blank=True, editable=False)
     consent_user_agent = models.CharField(max_length=255, blank=True, editable=False)
@@ -415,19 +423,165 @@ def _required_text(help_text=""):
     return models.TextField(blank=True, help_text=help_text)
 
 
-class ContractTerms(models.Model):
+def _blank(value) -> bool:
+    return not str(value if value is not None else "").strip()
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ApprovedContent(models.Model):
+    """Where approved contract content came from, and whether it is live
+    (Contract Recovery & Release decision v2.3 §1A and §5, 19 Nov 2026).
+
+    Lifecycle, one way only. Each step is an admin action that needs its own
+    permission; the state can't be typed in:
+
+        DRAFT ──record approval──▶ APPROVED ──publish──▶ PUBLISHED ──retire──▶ RETIRED
+          ▲                           │
+          └──────return to draft──────┘   (only before it was ever used)
+
+    * Recording approval needs evidence: the approval reference and date, the
+      responsible owner and the signed master's file name and SHA-256. Ticking
+      a box or editing a string is never approval, and a draft is never
+      promoted automatically.
+    * Only PUBLISHED content whose effective dates cover today is used for a
+      customer's documents or shown on the website.
+    * From APPROVED on, the record is frozen. A change is a new version;
+      documents already issued keep their own copy either way.
+    """
+
+    class State(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        APPROVED = "approved", "Approved (evidence recorded, not live)"
+        PUBLISHED = "published", "Published (in use)"
+        RETIRED = "retired", "Retired"
+
+    state = models.CharField(max_length=10, choices=State.choices, default=State.DRAFT, editable=False)
+
+    # Evidence of the approval. That may be years old: this records it, it doesn't replace it.
+    approval_reference = models.CharField(
+        max_length=255, blank=True, help_text="Sign-off email, minutes or approval record reference.")
+    approval_date = models.DateField(null=True, blank=True, help_text="Date the content was approved.")
+    document_owner = models.CharField(max_length=150, blank=True, help_text="Responsible owner (name / role).")
+    source_document = models.CharField(
+        max_length=255, blank=True, help_text="File name of the signed / approved master document.")
+    source_sha256 = models.CharField(
+        max_length=64, blank=True, help_text="SHA-256 of that file. Filled in when you attach the file in admin.")
+    source_location = models.CharField(
+        max_length=255, blank=True, help_text="Where the controlled copy is kept (restricted repository).")
+
+    effective_from = models.DateField(null=True, blank=True, help_text="First UK date this version may be used.")
+    effective_to = models.DateField(null=True, blank=True, help_text="Not used from this date (set on retiring).")
+
+    # Who recorded each step in this system, and when.
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+        editable=False,
+    )
+    approved_at = models.DateTimeField(null=True, blank=True, editable=False)
+    published_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+        editable=False,
+    )
+    published_at = models.DateTimeField(null=True, blank=True, editable=False)
+    retired_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    EVIDENCE_FIELDS = ("approval_reference", "approval_date", "document_owner", "source_document",
+                       "source_sha256", "source_location", "effective_from")
+
+    class Meta:
+        abstract = True
+
+    @property
+    def frozen(self) -> bool:
+        return self.state != self.State.DRAFT
+
+    @property
+    def is_live(self) -> bool:
+        from django.utils import timezone
+
+        today = timezone.localdate()
+        return (self.state == self.State.PUBLISHED and self.effective_from is not None
+                and self.effective_from <= today and (self.effective_to is None or self.effective_to > today))
+
+    @classmethod
+    def live(cls, today=None):
+        """Published versions in effect on `today` (UK date), newest first."""
+        from django.utils import timezone
+
+        today = today or timezone.localdate()
+        return (
+            cls.objects.filter(state=cls.State.PUBLISHED, effective_from__lte=today)
+            .filter(models.Q(effective_to__isnull=True) | models.Q(effective_to__gt=today))
+            .order_by("-effective_from", "-published_at", "-pk")
+        )
+
+    def evidence_problems(self) -> list[str]:
+        problems = [f for f in self.EVIDENCE_FIELDS if _blank(getattr(self, f))]
+        if self.source_sha256 and not _SHA256_RE.match(self.source_sha256):
+            problems.append("source_sha256 (must be 64 lower-case hex characters)")
+        if self.effective_to and self.effective_from and self.effective_to <= self.effective_from:
+            problems.append("effective_to (must be after effective_from)")
+        return problems
+
+    def content_problems(self) -> list[str]:
+        raise NotImplementedError
+
+    def approval_problems(self) -> list[str]:
+        """Everything that stops this version being approved, for staff."""
+        return self.evidence_problems() + self.content_problems()
+
+    # ── Lifecycle (called from admin actions; each raises ValidationError) ──
+
+    def record_approval(self, user):
+        from django.utils import timezone
+
+        if self.state != self.State.DRAFT:
+            raise ValidationError("Only a draft can be approved.")
+        problems = self.approval_problems()
+        if problems:
+            raise ValidationError(problems)
+        self.state, self.approved_by, self.approved_at = self.State.APPROVED, user, timezone.now()
+        self.save()
+
+    def publish(self, user):
+        from django.utils import timezone
+
+        if self.state != self.State.APPROVED:
+            raise ValidationError("Only approved content can be published.")
+        problems = self.approval_problems()
+        if problems:
+            raise ValidationError(problems)
+        self.state, self.published_by, self.published_at = self.State.PUBLISHED, user, timezone.now()
+        self.save()
+
+    def retire(self):
+        from django.utils import timezone
+
+        if self.state not in (self.State.APPROVED, self.State.PUBLISHED):
+            raise ValidationError("Only approved or published content can be retired.")
+        today = timezone.localdate()
+        if self.effective_to is None or self.effective_to > today:
+            self.effective_to = today
+        self.state, self.retired_at = self.State.RETIRED, timezone.now()
+        self.save()
+
+    def return_to_draft(self):
+        if self.state != self.State.APPROVED or self.published_at:
+            raise ValidationError("Only approved content that was never published can go back to draft.")
+        self.state, self.approved_by, self.approved_at = self.State.DRAFT, None, None
+        self.save()
+
+
+class ContractTerms(ApprovedContent):
     """Legal-approved wording used in every customer's Contract Summary and
-    Contract Information. Only the newest *approved* version is used, and each
+    Contract Information. Only the newest live version is used, and each
     issued document stores a copy of what it used, so editing or replacing a
     version never changes documents already issued (CS-10, CI-17).
     """
 
     version = models.CharField(max_length=32, unique=True, help_text="e.g. 2026-11-v1")
-    approved = models.BooleanField(default=False, help_text="Legal / Compliance sign-off given.")
-    approved_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
-    )
-    approved_at = models.DateTimeField(null=True, blank=True)
 
     # Issuer (Companies House: ZOIKO MOBILE UK LTD, 16564980).
     legal_name = models.CharField(max_length=120, default="Zoiko Mobile UK Ltd")
@@ -474,17 +628,41 @@ class ContractTerms(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Every field the documents print. All must be filled before approval.
+    TEXT_FIELDS = (
+        "legal_name", "company_number", "registered_office", "support_phone", "support_email", "website",
+        "customer_care_hours", "complaints_route", "complaints_code", "adr_scheme", "compensation",
+        "device", "service_availability", "quality_and_sla", "traffic_management", "performance_remedies",
+        "payment_method", "billing_start", "usage_controls", "provisioning",
+        "cancellation", "cooling_off", "prepaid_credit_refund",
+        "data_categories", "privacy_policy", "security_incidents", "directory_listing",
+        "emergency_access", "accessibility",
+    )
+
     class Meta:
         ordering = ["-created_at"]
         verbose_name = "contract terms (Legal)"
         verbose_name_plural = "contract terms (Legal)"
+        permissions = [
+            ("approve_contractterms", "Can record Legal approval of contract terms"),
+            ("publish_contractterms", "Can publish or retire contract terms"),
+        ]
 
     def __str__(self):
-        return f"Contract terms {self.version}{' (approved)' if self.approved else ''}"
+        return f"Contract terms {self.version} ({self.get_state_display()})"
 
     @classmethod
-    def current(cls):
-        return cls.objects.filter(approved=True).order_by("-approved_at", "-pk").first()
+    def current(cls, today=None):
+        return cls.live(today).first()
+
+    def content_problems(self) -> list[str]:
+        problems = [f for f in self.TEXT_FIELDS if _blank(getattr(self, f))]
+        rules = list(self.term_rules.all()) if self.pk else []
+        if not rules:
+            problems.append("term rules (at least one plan length)")
+        for rule in rules:
+            problems += [f"rule {rule.term}.{f}" for f in ContractTermRule.TEXT_FIELDS if _blank(getattr(rule, f))]
+        return problems
 
 
 class ContractTermRule(models.Model):
@@ -496,6 +674,8 @@ class ContractTermRule(models.Model):
     renewal = _required_text("What happens at the end of the commitment.")
     early_termination = _required_text("Exact charge or formula, or 'None' only if true.")
 
+    TEXT_FIELDS = ("minimum_commitment", "renewal", "early_termination")
+
     class Meta:
         unique_together = [("terms", "term")]
 
@@ -503,32 +683,124 @@ class ContractTermRule(models.Model):
         return f"{self.terms.version} · {self.get_term_display()}"
 
 
-class PlanTariff(models.Model):
-    """Product-approved tariff facts for one plan, used in its documents."""
+# Ofcom (17 Jan 2025): new contracts can't have inflation-linked or
+# percentage-based in-contract rises; any rise is stated in £/p with a date.
+# Wording that looks like such a formula blocks approval (T03).
+_FORMULA_PRICE_RISE_RE = re.compile(
+    r"\d\s*(%|per\s*cent|percent)|\b(CPI|CPIH|RPI)\b|retail\s+prices?\s+index|consumer\s+prices?\s+index",
+    re.IGNORECASE,
+)
 
-    plan = models.OneToOneField("plans.Plan", on_delete=models.CASCADE, related_name="contract_tariff")
+
+def formula_price_rise(text: str) -> bool:
+    return bool(_FORMULA_PRICE_RISE_RE.search(text or ""))
+
+
+class PlanTariff(ApprovedContent):
+    """Product/Finance-approved tariff facts for one plan version (v2.3 §3, §5).
+
+    A plan can have several versions over time; documents use the one live on
+    the day they are issued.
+    """
+
+    plan = models.ForeignKey("plans.Plan", on_delete=models.CASCADE, related_name="contract_tariffs")
     version = models.CharField(max_length=32, help_text="Bump whenever the content changes.")
-    approved = models.BooleanField(default=False, help_text="Commercial / Product sign-off given.")
-    approved_at = models.DateTimeField(null=True, blank=True)
+
+    # Commercial binding.
+    plan_sku = models.CharField(max_length=64, blank=True, help_text="Plan SKU in the approved catalogue.")
+    tariff_code = models.CharField(max_length=64, blank=True, help_text="Tariff / rate schedule code.")
+    vat_basis = _required_text("Approved VAT statement, e.g. that all prices include VAT.")
 
     uk_data = _required_text("e.g. '30GB' or 'Unlimited (fair use applies)'.")
     uk_minutes = _required_text()
     uk_texts = _required_text()
     fair_use = _required_text("Material limits, speed caps, fair use; or 'None'.")
-    after_allowance = _required_text("What happens after the allowance (charge, block, slow down).")
-    rollover = _required_text("Whether unused allowance carries over.")
+    after_allowance = _required_text(
+        "Out-of-allowance rule for data, minutes and texts: charge (with VAT treatment), bar or slow down.")
+    rollover_applies = models.BooleanField(
+        null=True, blank=True,
+        help_text="Does unused allowance carry over? Must be answered: blank is not 'No'.")
+    rollover = _required_text("Approved rollover wording: eligible allowances, limits, expiry and exclusions.")
     roaming_zone = _required_text("Included destinations / zone (not '44 EU countries' as a shortcut).")
     roaming_allowance = _required_text("Included roaming data, minutes, texts and fair use.")
     roaming_rates = _required_text("Charges outside the zone or allowance; rate schedule version.")
     speeds = _required_text("Advertised and estimated maximum download / upload speeds.")
     extra_charges = _required_text("Out-of-allowance, international, premium: tariff version / link.")
     one_off_charges = _required_text("SIM / delivery / activation charges, or 'None'.")
-    scheduled_price_changes = _required_text("Fixed future price changes with dates, or 'None'.")
+    price_changes_apply = models.BooleanField(
+        null=True, blank=True,
+        help_text="Are there scheduled in-contract price rises? Yes needs the £/p rows below; must be answered.")
+    scheduled_price_changes = _required_text(
+        "Approved wording: either the approved 'no scheduled rises' statement, or the text introducing the "
+        "dated £/p rises below. No CPI/RPI or percentage rises (Ofcom, 17 Jan 2025).")
 
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    TEXT_FIELDS = (
+        "plan_sku", "tariff_code", "vat_basis",
+        "uk_data", "uk_minutes", "uk_texts", "fair_use", "after_allowance", "rollover",
+        "roaming_zone", "roaming_allowance", "roaming_rates", "speeds", "extra_charges",
+        "one_off_charges", "scheduled_price_changes",
+    )
+
+    class Meta:
+        ordering = ["plan_id", "-effective_from", "-pk"]
+        unique_together = [("plan", "version")]
+        permissions = [
+            ("approve_plantariff", "Can record Product/Finance approval of plan tariffs"),
+            ("publish_plantariff", "Can publish or retire plan tariffs"),
+        ]
+
     def __str__(self):
-        return f"{self.plan} · tariff {self.version}{' (approved)' if self.approved else ''}"
+        return f"{self.plan} · tariff {self.version} ({self.get_state_display()})"
+
+    @classmethod
+    def current(cls, plan_id, today=None):
+        return cls.live(today).filter(plan_id=plan_id).first()
+
+    def content_problems(self) -> list[str]:
+        problems = [f for f in self.TEXT_FIELDS if _blank(getattr(self, f))]
+        if self.rollover_applies is None:
+            problems.append("rollover_applies (answer yes or no)")
+        if self.price_changes_apply is None:
+            problems.append("price_changes_apply (answer yes or no)")
+        if formula_price_rise(self.scheduled_price_changes):
+            problems.append("scheduled_price_changes (CPI/RPI or percentage rises aren't allowed; use £/p and dates)")
+        changes = list(self.price_changes.all()) if self.pk else []
+        if self.price_changes_apply and not changes:
+            problems.append("price changes (add the dated £/p rises, or answer No)")
+        if self.price_changes_apply is False and changes:
+            problems.append("price changes (rows entered but 'price changes apply' is No)")
+        for change in changes:
+            problems += [f"price change {change}: {p}" for p in change.problems(self.effective_from)]
+        return problems
+
+
+class PlanPriceChange(models.Model):
+    """One scheduled in-contract price rise, in pounds and pence with a date."""
+
+    tariff = models.ForeignKey(PlanTariff, on_delete=models.CASCADE, related_name="price_changes")
+    term = models.CharField(max_length=3, choices=Term.choices, blank=True,
+                            help_text="Plan length it applies to; blank = every plan length.")
+    effective_date = models.DateField(help_text="Date the new price applies from.")
+    new_price = models.DecimalField(max_digits=8, decimal_places=2,
+                                    help_text="New recurring price in £, including VAT.")
+
+    class Meta:
+        ordering = ["effective_date", "term"]
+        unique_together = [("tariff", "term", "effective_date")]
+
+    def __str__(self):
+        return f"{self.get_term_display() or 'all lengths'} from {self.effective_date}"
+
+    def problems(self, effective_from=None) -> list[str]:
+        out = []
+        if self.new_price is None or self.new_price <= 0:
+            out.append("new price must be more than £0.00")
+        if effective_from and self.effective_date and self.effective_date <= effective_from:
+            out.append("date must be after the tariff's effective_from")
+        return out
 
 
 class ImmutableRecord(Exception):
@@ -619,6 +891,55 @@ class SwitchContractDocument(models.Model):
         return hashlib.sha256(bytes(self.pdf)).hexdigest() == self.sha256
 
 
+class SwitchContractProvision(models.Model):
+    """Each time contract documents were provided to the customer: made
+    available in their account, emailed (with the mail service's answer) or
+    downloaded. Append-only evidence that both documents were provided before
+    consent (v2.3 §4–5, T04). Opening a PDF is never required to agree."""
+
+    class Method(models.TextChoices):
+        ACCOUNT = "account", "Made available to view and download in the customer's account"
+        EMAIL = "email", "Emailed as PDF attachments"
+        DOWNLOAD = "download", "Downloaded by the customer"
+
+    pack = models.ForeignKey(SwitchContractPack, on_delete=models.PROTECT, related_name="provisions")
+    # Blank = every document in the pack (account / email); set for a download.
+    document = models.ForeignKey(
+        SwitchContractDocument, on_delete=models.PROTECT, null=True, blank=True, related_name="provisions",
+    )
+    method = models.CharField(max_length=10, choices=Method.choices)
+    succeeded = models.BooleanField()
+    recipient_masked = models.CharField(max_length=255, blank=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+
+    def __str__(self):
+        return f"{self.pack.reference} · {self.get_method_display()}{'' if self.succeeded else ' (failed)'}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutableRecord("Provision evidence can't be changed.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecord("Provision evidence can't be deleted.")
+
+    def as_evidence(self) -> dict:
+        return {
+            "method": self.method,
+            "document": str(self.document.public_id) if self.document_id else None,
+            "succeeded": self.succeeded,
+            "at": self.created_at.isoformat(),
+        }
+
+
 class SwitchContractConsent(models.Model):
     """Express consent to one issued pack (CS-02, CI-03), recorded only after
     the customer was given both documents. Evidence: never edited; only the
@@ -631,6 +952,9 @@ class SwitchContractConsent(models.Model):
     statement_version = models.CharField(max_length=32)
     # {document public id: sha256} for both documents, as confirmed by the customer.
     documents = models.JSONField()
+    # Copy of the SwitchContractProvision events before consent: how and when
+    # the documents were provided (T04).
+    provision = models.JSONField(default=list)
     immediate_service_requested = models.BooleanField(default=False)
     consented_at = models.DateTimeField()
     ip_address = models.GenericIPAddressField(null=True, blank=True)
