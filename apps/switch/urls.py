@@ -9,9 +9,11 @@ from .views import (
     ContractConsentView,
     ContractDocumentDownloadView,
     ContractDocumentsView,
+    ContractTermsView,
     MySwitchRequestsView,
     OrderDocumentsView,
     OrderPreviewView,
+    PlanContractView,
     ReceiptDownloadView,
     SwitchFeedbackView,
     SwitchPortCodeView,
@@ -63,6 +65,9 @@ urlpatterns = [
         name="document-download",
     ),
     path("v1/switch/quote/", SwitchQuoteView.as_view(), name="quote"),
+    # Published contract content: the website's only legal source (v2.3 §5)
+    path("v1/switch/contract-terms/", ContractTermsView.as_view(), name="contract-terms"),
+    path("v1/switch/plans/<int:plan_id>/contract/", PlanContractView.as_view(), name="plan-contract"),
     # Staff only
     path("switch-requests/all/", SwitchRequestListView.as_view(), name="list"),
     path(

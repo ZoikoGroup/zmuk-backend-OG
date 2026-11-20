@@ -468,9 +468,10 @@ STRIPE_ADD_LINE_WEBHOOK_SECRET = os.getenv("STRIPE_ADD_LINE_WEBHOOK_SECRET")
 # SWITCH & SAVE (apps.switch) — CTO Milestone 04 decision, 12 Nov 2026
 # =============================================================================
 
-# Version of the Step 4 authorisation wording. Bump it whenever the wording
-# changes; a form showing an older version is asked to refresh.
-SWITCH_CONSENT_VERSION = os.getenv("SWITCH_CONSENT_VERSION", "2026-11-12")
+# Version of the Step 4 authorisation wording (text in apps/switch/wording.py;
+# v2.3 §4 wording from 2026-11-20). Bump it whenever the wording changes; a
+# form showing an older version is asked to refresh.
+SWITCH_CONSENT_VERSION = os.getenv("SWITCH_CONSENT_VERSION", "2026-11-20")
 
 # An identical open request within this many minutes is treated as a retry.
 SWITCH_DEDUPE_MINUTES = int(os.getenv("SWITCH_DEDUPE_MINUTES", "10"))
@@ -478,6 +479,15 @@ SWITCH_DEDUPE_MINUTES = int(os.getenv("SWITCH_DEDUPE_MINUTES", "10"))
 # Milestone 4 request→order conversion (linking orders/lines to requests).
 # OFF until Product, Finance, Legal, Security, QA and Ops sign off (M04 §07).
 SWITCH_ORDER_CONVERSION_ENABLED = os.getenv("SWITCH_ORDER_CONVERSION_ENABLED", "False") == "True"
+
+# Part B also stays closed while ADD_LINE_SUPPLIER_WRITES_ENABLED is off, so a
+# customer can never pay for a line that can't be activated (Engineering
+# Decision v2.1 §04/§07). Set this True only for a Finance-approved,
+# time-limited exception with a fulfilment and refund policy (e.g. a staging
+# test with Stripe test mode). Never a routine production setting.
+SWITCH_ORDERS_WITHOUT_SUPPLIER_WRITES_APPROVED = (
+    os.getenv("SWITCH_ORDERS_WITHOUT_SUPPLIER_WRITES_APPROVED", "False") == "True"
+)
 
 # purge_switch_codes deletes encrypted PAC/STAC codes only when this is True.
 # OFF until Operations and Legal approve the retention rules (note of 13 Nov

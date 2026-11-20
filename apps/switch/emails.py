@@ -10,6 +10,15 @@ from django.utils.html import strip_tags
 logger = logging.getLogger("apps.switch")
 
 
+def ops_recipient() -> str:
+    return (
+        getattr(settings, "SWITCH_OPS_EMAIL", None)
+        or getattr(settings, "BLOG_NOTIFICATION_ADMIN_EMAIL", None)
+        or getattr(settings, "DEFAULT_FROM_EMAIL", None)
+        or "info@zoikomobile.co.uk"
+    )
+
+
 def send_html_email(subject, template_name, context, recipient, attachments=()) -> bool:
     """Send one email. Returns True once the mail backend accepted it, False
     on failure (logged without the recipient). Callers record the outcome;

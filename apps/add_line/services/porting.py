@@ -9,9 +9,13 @@
 * A failed or invalid code never touches the new line: it keeps working and
   the customer can submit a new code.
 * Nothing is sent while ADD_LINE_SUPPLIER_WRITES_ENABLED is off.
+* A PAC/STAC lives 30 days (Ofcom). `code_expires_at` is set from when we
+  received the code, and `submit` re-checks it every time, so an expired
+  code is never sent to Transatel, however long it was held.
 """
 
 import logging
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -34,6 +38,21 @@ _PROGRESS = [
 # Supplier HTTP errors worth retrying; other 4xx mean the request itself is wrong.
 _RETRYABLE_HTTP = {401, 408, 409, 423, 429}
 
+# Ofcom: a PAC/STAC is valid for 30 days from issue. We only know when we
+# received it, so the code is treated as expired from received date + 30.
+CODE_LIFE_DAYS = 30
+CODE_EXPIRED_DETAIL = "switch code expired before submission"
+
+
+def code_expiry_date(received_at=None):
+    """First UK date on which a code received at `received_at` is no longer used."""
+    return timezone.localdate(received_at or timezone.now()) + timedelta(days=CODE_LIFE_DAYS)
+
+
+def code_expired(port: PortRequest, today=None) -> bool:
+    expires = port.code_expires_at or code_expiry_date(port.created_at)  # rows from before the field was set
+    return (today or timezone.localdate()) >= expires
+
 
 class PortError(Exception):
     def __init__(self, code: str, message: str, status: int = 400):
@@ -43,7 +62,10 @@ class PortError(Exception):
         self.status = status
 
 
-def create_request(user, line: Line, *, code_type, code, msisdn, wished_date=None) -> PortRequest:
+def create_request(user, line: Line, *, code_type, code, msisdn, wished_date=None,
+                   code_received_at=None) -> PortRequest:
+    """`code_received_at`: when the customer gave us the code, if earlier
+    than now (a Switch & Save request hands over a code it already held)."""
     if line.status not in (Line.Status.PENDING_ACTIVATION, Line.Status.ACTIVE):
         raise PortError("LINE_NOT_ELIGIBLE", "This line can't receive a number transfer.")
 
@@ -63,6 +85,11 @@ def create_request(user, line: Line, *, code_type, code, msisdn, wished_date=Non
     if wished_date and wished_date <= timezone.localdate():
         raise PortError("WISHED_DATE_INVALID", "Choose a transfer date in the future.")
 
+    expires = code_expiry_date(code_received_at)
+    if timezone.localdate() >= expires:
+        raise PortError("CODE_EXPIRED", f"This {code_type} has expired. Please get a new one from your "
+                                        "current provider.")
+
     try:
         encrypted = pac.encrypt(code)
     except pac.PacStorageUnavailable:
@@ -73,7 +100,7 @@ def create_request(user, line: Line, *, code_type, code, msisdn, wished_date=Non
         with transaction.atomic():
             port = PortRequest.objects.create(
                 line=line, order=order, code_type=code_type, encrypted_code=encrypted,
-                portability_msisdn=msisdn, wished_date=wished_date,
+                portability_msisdn=msisdn, wished_date=wished_date, code_expires_at=expires,
             )
     except IntegrityError:
         raise PortError("PORT_IN_PROGRESS", "A transfer for this line is already in progress.", 409)
@@ -93,6 +120,11 @@ def submit(port: PortRequest) -> PortRequest:
         port = PortRequest.objects.select_for_update().get(pk=port.pk)
         line = port.line
         if port.status != S.AWAITING_ACTIVATION or line.status != Line.Status.ACTIVE or not line.sim:
+            return port
+        if code_expired(port):
+            # Re-checked on every attempt (held work included): never send a
+            # code past its 30-day life. The customer can send a new one.
+            _set_status(port, S.ERROR, error={"detail": CODE_EXPIRED_DETAIL})
             return port
         if not settings.ADD_LINE_SUPPLIER_WRITES_ENABLED:
             # Code stays encrypted and waiting; reconcile_port_requests sends it later.

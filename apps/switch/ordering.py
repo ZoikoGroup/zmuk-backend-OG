@@ -7,8 +7,14 @@ Order of events required by CTO documents 01/02 (non-negotiable):
     express consent (B3) → payment (B3) → receipt (B4)
 
 Only the signed-in owner of a READY_FOR_ORDER request can use these, and
-only while SWITCH_ORDER_CONVERSION_ENABLED is on. Issued documents stay
+only while Part B is enabled (continuation.enabled). Issued documents stay
 downloadable by their owner afterwards.
+
+If approved contract content is missing or can't be rendered, no document is
+issued and no payment is possible. The request is parked as "Action needed —
+internal" (reason contract_docs, owner operations), the fault is noted and
+Operations are alerted. Ops reopen it with "ready for order" once Legal /
+Product have fixed the content (Engineering Decision v2.1 §04).
 """
 
 import logging
@@ -17,6 +23,7 @@ from datetime import timedelta
 import stripe
 from django.conf import settings
 from django.db import transaction
+from django.urls import reverse
 from django.utils import timezone
 
 from apps.add_line.models import AddLineOrder, SimType
@@ -25,11 +32,12 @@ from apps.add_line.services.quote import QuoteError, build_quote
 from core.stripe_compat import to_plain
 
 from . import continuation, documents, services
-from .emails import send_html_email
+from .emails import ops_recipient, send_html_email
 from .models import (
     SwitchContractConsent,
     SwitchContractDocument,
     SwitchContractPack,
+    SwitchContractProvision,
     SwitchRequest,
     SwitchStatusEvent,
 )
@@ -39,10 +47,12 @@ logger = logging.getLogger("apps.switch")
 S = SwitchRequest.Status
 PDF = "application/pdf"
 
-# Approved wording (CTO document 02, Part B §05).
+R = SwitchRequest.ActionReason
+
+# Approved wording (Engineering Decision v2.1 §04, 19 Nov 2026).
 DOCUMENTS_FAILED_MESSAGE = (
-    "We could not prepare your contract documents. No order has been placed. "
-    "Please try again or contact support."
+    "We can't complete your contract documents right now. Your request is saved. "
+    "We'll contact you when you can continue."
 )
 _PRICE_KEYS = ("monthly_price", "promo", "delivery_fee", "charge_today", "recurring_amount", "currency")
 
@@ -73,9 +83,16 @@ def get_owned(reference: str, user) -> SwitchRequest:
     return switch
 
 
+def _documents_unavailable():
+    return OrderError("DOCUMENTS_UNAVAILABLE", DOCUMENTS_FAILED_MESSAGE, 503)
+
+
 def _check_ready(switch: SwitchRequest):
     if not continuation.enabled():
         raise OrderError(continuation.NOT_AVAILABLE.code, continuation.NOT_AVAILABLE.message, 404)
+    if switch.status == S.ACTION_NEEDED and switch.action_reason == R.CONTRACT_DOCS:
+        # Parked by _hold_for_documents: keep showing the same safe message.
+        raise _documents_unavailable()
     if switch.status != S.READY_FOR_ORDER:
         raise OrderError(continuation.NOT_READY.code, continuation.NOT_READY.message, 409)
     if switch.required_code_type and services.code_expired(switch):
@@ -174,6 +191,48 @@ def pack_data(pack):
     }
 
 
+def _hold_for_documents(switch: SwitchRequest, fault: str) -> None:
+    """Park the request as an internal action and alert Operations, once.
+
+    `fault` names missing content fields / render errors only (no personal
+    data); it goes to the log, the ops note and the ops email, never to the
+    customer. Repeat attempts while parked don't alert again.
+    """
+    logger.error("Contract documents blocked for %s: %s", switch.reference, fault)
+    with transaction.atomic():
+        locked = SwitchRequest.objects.select_for_update().get(pk=switch.pk)
+        if locked.status != S.READY_FOR_ORDER:
+            return
+        locked.set_status(S.ACTION_NEEDED, reason=R.CONTRACT_DOCS, owner=SwitchRequest.ActionOwner.OPERATIONS)
+        stamp = timezone.now().strftime("%Y-%m-%d %H:%M")
+        locked.ops_note = f"{locked.ops_note}\n[{stamp}] Contract documents blocked — {fault}".strip()
+        locked.save(update_fields=["ops_note", "updated_at"])
+    switch.status, switch.action_reason, switch.action_owner = locked.status, locked.action_reason, locked.action_owner
+
+    alerted = send_html_email(
+        subject=f"Action needed: contract documents blocked for {locked.reference}",
+        template_name="emails/switch_ops_alert.html",
+        context={
+            "title": "Contract documents blocked",
+            "summary": ("A customer tried to continue their switch but their contract documents could not be "
+                        "issued. No document was issued and no payment was taken. The request is saved and "
+                        "waiting on Operations."),
+            "reference": locked.reference,
+            "selected_plan": locked.selected_plan,
+            "contract_term": locked.get_contract_term_display() if locked.contract_term else "",
+            "fault": fault,
+            "next_step": ("Ask Legal / Product to complete and approve the contract terms and plan tariff in the "
+                          "admin, then move the request to 'ready for order' (this emails the customer a new "
+                          "link)."),
+            "admin_url": settings.BACKEND_URL.rstrip("/") + reverse(
+                "admin:switch_switchrequest_change", args=[locked.pk]),
+        },
+        recipient=ops_recipient(),
+    )
+    if not alerted:
+        logger.error("Ops alert for blocked contract documents on %s was not sent", locked.reference)
+
+
 def issue_documents(switch: SwitchRequest, user) -> SwitchContractPack:
     """Freeze the quote and issue both PDFs (or return the still-valid pack
     for the same quote and content versions, so the bytes don't change
@@ -183,8 +242,8 @@ def issue_documents(switch: SwitchRequest, user) -> SwitchContractPack:
     sources = documents.find_sources(switch.plan_id, switch.contract_term)
     missing = documents.missing_content(sources)
     if missing:
-        logger.error("Contract documents blocked for %s: %s", switch.reference, ", ".join(missing))
-        raise OrderError("DOCUMENTS_UNAVAILABLE", DOCUMENTS_FAILED_MESSAGE, 503)
+        _hold_for_documents(switch, "missing approved content: " + ", ".join(missing))
+        raise _documents_unavailable()
 
     existing = current_pack(switch, user)
     if (existing and existing.quote_hash == quote.hash and existing.terms_version == sources.terms.version
@@ -202,8 +261,8 @@ def issue_documents(switch: SwitchRequest, user) -> SwitchContractPack:
         summary = documents.render_summary(content)
         information = documents.render_information(content)
     except (documents.MissingContent, documents.TooLong) as exc:
-        logger.error("Contract documents blocked for %s: %s", switch.reference, exc)
-        raise OrderError("DOCUMENTS_UNAVAILABLE", DOCUMENTS_FAILED_MESSAGE, 503)
+        _hold_for_documents(switch, f"documents could not be rendered: {exc}")
+        raise _documents_unavailable()
 
     with transaction.atomic():
         SwitchContractPack.objects.filter(
@@ -225,9 +284,24 @@ def issue_documents(switch: SwitchRequest, user) -> SwitchContractPack:
                 pack=pack, kind=kind, filename=f"Zoiko_Mobile_{name}_{reference}.pdf",
                 pdf=pdf, sha256=documents.sha256(pdf), size=len(pdf), template_version=template,
             )
+        # Both PDFs are now in the customer's account to view and download.
+        SwitchContractProvision.objects.create(
+            pack=pack, method=SwitchContractProvision.Method.ACCOUNT, succeeded=True, actor=user,
+        )
 
     _email_documents(pack)
     return pack
+
+
+def _provided(pack: SwitchContractPack):
+    """Successful provision events if, together, they cover every document
+    in the pack; else None."""
+    events = list(pack.provisions.filter(succeeded=True).select_related("document"))
+    needed = {d.pk for d in pack.documents.all()}
+    covered = set()
+    for event in events:
+        covered |= needed if event.document_id is None else {event.document_id}
+    return events if needed and covered >= needed else None
 
 
 def _email_documents(pack: SwitchContractPack):
@@ -251,9 +325,14 @@ def _email_documents(pack: SwitchContractPack):
     pack.email_status = SwitchContractPack.EmailStatus.SENT if sent else SwitchContractPack.EmailStatus.FAILED
     pack.email_sent_at = timezone.now() if sent else None
     pack.save(update_fields=["email_status", "email_sent_at"])
+    SwitchContractProvision.objects.create(
+        pack=pack, method=SwitchContractProvision.Method.EMAIL, succeeded=sent,
+        recipient_masked=services.mask_email(pack.customer.email or switch.email),
+    )
 
 
-def get_document(switch: SwitchRequest, user, document_id) -> SwitchContractDocument:
+def get_document(switch: SwitchRequest, user, document_id, *, ip_address=None,
+                 user_agent="") -> SwitchContractDocument:
     """An issued PDF for its owner, checked against its stored hash."""
     doc = (
         SwitchContractDocument.objects.select_related("pack")
@@ -266,6 +345,10 @@ def get_document(switch: SwitchRequest, user, document_id) -> SwitchContractDocu
         logger.critical("Contract document %s failed its integrity check", doc.public_id)
         raise OrderError("DOCUMENT_UNAVAILABLE",
                          "We couldn't open this document. Please contact support.", 500)
+    SwitchContractProvision.objects.create(
+        pack=doc.pack, document=doc, method=SwitchContractProvision.Method.DOWNLOAD, succeeded=True,
+        actor=user, ip_address=ip_address or None, user_agent=(user_agent or "")[:255],
+    )
     return doc
 
 
@@ -319,9 +402,15 @@ def consent(switch: SwitchRequest, user, *, pack_id, documents_given, immediate_
             raise OrderError("DOCUMENTS_MISMATCH", "These aren't the documents we issued to you. "
                              "Please review the latest documents and try again.", 409)
         if not SwitchContractConsent.objects.filter(pack=pack).exists():
+            # Both documents must have been provided before consent (T04).
+            provided = _provided(pack)
+            if provided is None:
+                raise OrderError("DOCUMENTS_NOT_PROVIDED", "We couldn't confirm your contract documents were "
+                                 "provided to you. Please review the latest documents and try again.", 409)
             SwitchContractConsent.objects.create(
                 pack=pack, customer=user, statement=CONSENT_STATEMENT,
                 statement_version=CONSENT_STATEMENT_VERSION, documents=expected,
+                provision=[event.as_evidence() for event in provided],
                 immediate_service_requested=bool(immediate_service_requested),
                 consented_at=timezone.now(), ip_address=ip_address or None,
                 user_agent=(user_agent or "")[:255],

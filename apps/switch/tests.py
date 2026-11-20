@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from cryptography.fernet import Fernet
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Permission, User
 from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -23,16 +23,18 @@ from apps.add_line.services import pac, payments
 from apps.coupons.models import Coupon
 from apps.plans.models import Plan
 from apps.sims.models import Sim
-from apps.switch import continuation, documents, receipts, services
+from apps.switch import continuation, documents, ordering, receipts, services, wording
 from apps.switch.models import (
     ContractTermRule,
     ContractTerms,
     ImmutableRecord,
+    PlanPriceChange,
     PlanTariff,
     SwitchContinuationToken,
     SwitchContractConsent,
     SwitchContractDocument,
     SwitchContractPack,
+    SwitchContractProvision,
     SwitchDocumentDelivery,
     SwitchPaymentCapture,
     SwitchPaymentReceipt,
@@ -56,7 +58,7 @@ def make_plan(**kwargs):
     return Plan.objects.create(**{**defaults, **kwargs})
 
 
-@override_settings(PAC_ENCRYPTION_KEY=KEY, SWITCH_CONSENT_VERSION="2026-11-12")
+@override_settings(PAC_ENCRYPTION_KEY=KEY, SWITCH_CONSENT_VERSION="2026-11-20")
 class SwitchTestBase(TestCase):
     def setUp(self):
         cache.clear()  # throttles
@@ -73,7 +75,7 @@ class SwitchTestBase(TestCase):
             "switch_route": "keep_pac", "pac_code": "abc 123456", "pac_later": False,
             "promo_code": "", "opt_in_news": True, "opt_in_texts": False,
             "transfer_authorised": True, "timeline_acknowledged": True, "terms_accepted": True,
-            "consent_version": "2026-11-12",
+            "consent_version": "2026-11-20",
         }
         data.update(overrides)
         return data
@@ -115,9 +117,26 @@ class CreateTests(SwitchTestBase):
         # Quote snapshot and consent evidence (G2, G4).
         self.assertEqual(sr.quote_snapshot["quote"]["monthly_price"], "9.00")
         self.assertEqual(len(sr.quote_hash), 64)
-        self.assertEqual(sr.consent_version, "2026-11-12")
+        self.assertEqual(sr.consent_version, "2026-11-20")
+        self.assertEqual(sr.consent_statement, wording.REQUEST_AUTHORISATION["2026-11-20"])  # exact text (C8)
         self.assertIsNotNone(sr.consented_at)
         self.assertEqual(sr.consent_ip, "127.0.0.1")
+
+    def test_only_the_switching_authorisation_is_required(self):
+        """v2.3 §4: one mandatory box. Step 4 doesn't ask the customer to
+        accept contract terms; that happens in Part B."""
+        resp = self.submit(timeline_acknowledged=False, terms_accepted=False)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        SwitchRequest.objects.all().delete()
+        resp = self.submit(transfer_authorised=False)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("transfer_authorised", resp.data)
+        self.assertFalse(SwitchRequest.objects.exists())
+
+    def test_wording_version_must_exist(self):
+        self.assertEqual(wording.check_consent_wording(), [])
+        with override_settings(SWITCH_CONSENT_VERSION="1999-01-01"):
+            self.assertEqual([e.id for e in wording.check_consent_wording()], ["switch.E001"])
 
     def test_emails_are_masked(self):
         self.submit()
@@ -479,7 +498,10 @@ class QuoteTests(SwitchTestBase):
         self.assertEqual(resp.data["quote"]["monthly_price"], "8.00")
         self.assertIsNone(resp.data["quote_token"])
         self.assertIn("contract_version", resp.data["contract"])
-        self.assertEqual(resp.data["consent_version"], "2026-11-12")
+        self.assertEqual(resp.data["consent_version"], "2026-11-20")
+        # Step 4 shows the server's sentence, not a copy of its own (C8).
+        self.assertEqual(resp.data["consent_statement"], wording.REQUEST_AUTHORISATION["2026-11-20"])
+        self.assertIn("does not place a paid order", resp.data["consent_statement"])
 
     def test_promo_errors_name_the_field(self):
         resp = self.client.post(QUOTE_URL, {"plan_id": self.plan.pk, "term": "24M", "sim_type": "psim",
@@ -690,8 +712,8 @@ class AdminTests(SwitchTestBase):
         self.assertNotIn(ops_sr.reference, cust_page)
 
 
-@override_settings(SWITCH_ORDER_CONVERSION_ENABLED=True, FRONTEND_URL="https://zoiko.test",
-                   SWITCH_CONTINUATION_TTL_HOURS=48)
+@override_settings(SWITCH_ORDER_CONVERSION_ENABLED=True, ADD_LINE_SUPPLIER_WRITES_ENABLED=True,
+                   FRONTEND_URL="https://zoiko.test", SWITCH_CONTINUATION_TTL_HOURS=48)
 class ContinuationTests(SwitchTestBase):
     """Milestone 4 · B1: secure continuation link and claim."""
 
@@ -839,6 +861,41 @@ class ContinuationTests(SwitchTestBase):
             with self.assertRaises(continuation.ContinuationError):
                 continuation.issue_link(self.sr)
 
+    def test_flag_matrix(self):
+        """Engineering Decision v2.1 §07: Part B needs conversion AND supplier
+        writes, unless Finance approved a time-limited exception."""
+        token = self.issue()
+        cases = [
+            # (conversion, supplier writes, approved exception) → open?
+            (False, False, False, False),
+            (True, False, False, False),   # would take payment with no activation
+            (False, True, False, False),
+            (True, True, False, True),
+            (True, False, True, True),     # explicit, approved exception only
+        ]
+        for conversion, supplier, exception, is_open in cases:
+            with self.subTest(conversion=conversion, supplier=supplier, exception=exception), override_settings(
+                SWITCH_ORDER_CONVERSION_ENABLED=conversion, ADD_LINE_SUPPLIER_WRITES_ENABLED=supplier,
+                SWITCH_ORDERS_WITHOUT_SUPPLIER_WRITES_APPROVED=exception,
+            ):
+                self.assertEqual(continuation.enabled(), is_open)
+                resp = self.client.post(self.CHECK, {"token": token}, format="json")
+                if is_open:
+                    self.assertEqual(resp.status_code, 200, resp.data)
+                else:
+                    self.assertEqual((resp.status_code, resp.data["code"]), (404, "NOT_AVAILABLE"))
+                    with self.assertRaises(continuation.ContinuationError):
+                        continuation.issue_link(self.sr)
+
+    def test_admin_says_why_links_are_off(self):
+        admin_user = User.objects.create_superuser("ops", "ops@example.com", "pw")
+        self.client.force_login(admin_user)
+        with override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=False):
+            resp = self.client.post("/admin/switch/switchrequest/", {
+                "action": "send_continuation_link", "_selected_action": [self.sr.pk]}, follow=True)
+        self.assertContains(resp, "ADD_LINE_SUPPLIER_WRITES_ENABLED is off")
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_admin_ready_for_order_sends_link_only_when_enabled(self):
         self.sr.set_status(S.VALIDATING)
         admin_user = User.objects.create_superuser("ops", "ops@example.com", "pw")
@@ -856,16 +913,37 @@ class ContinuationTests(SwitchTestBase):
         self.assertEqual(SwitchContinuationToken.objects.get().created_by, admin_user)
 
 
-def approved_contract_content(plan, term="12M", version="T-1"):
-    """Fully filled, approved Legal terms + Product tariff (test data only)."""
+def approval_evidence(**overrides):
+    return {
+        "approval_reference": "LEGAL-SIGNOFF-2023-014", "approval_date": date(2023, 3, 1),
+        "document_owner": "Legal (records custodian)", "source_document": "master.pdf",
+        "source_sha256": "a" * 64, "source_location": "Legal controlled repository",
+        "effective_from": timezone.localdate(), **overrides,
+    }
+
+
+def draft_terms(version="T-1", term="12M", **overrides):
     fields = {f: f"Approved {f.replace('_', ' ')}." for f in documents._TERMS_FIELDS[6:]}
-    terms = ContractTerms.objects.create(version=version, approved=True, approved_at=timezone.now(), **fields)
+    terms = ContractTerms.objects.create(version=version, **{**approval_evidence(), **fields, **overrides})
     ContractTermRule.objects.create(terms=terms, term=term, minimum_commitment="12 months from activation.",
                                     renewal="Rolls monthly.", early_termination="Remaining months x price.")
-    tariff = PlanTariff.objects.create(
-        plan=plan, version="P-1", approved=True, approved_at=timezone.now(),
-        **{f: f"Approved {f.replace('_', ' ')}." for f in documents._TARIFF_FIELDS},
-    )
+    return terms
+
+
+def draft_tariff(plan, version="P-1", **overrides):
+    fields = {f: f"Approved {f.replace('_', ' ')}." for f in documents._TARIFF_FIELDS}
+    return PlanTariff.objects.create(plan=plan, version=version, **{
+        **approval_evidence(), **fields, "rollover_applies": False, "price_changes_apply": False, **overrides,
+    })
+
+
+def approved_contract_content(plan, term="12M", version="T-1"):
+    """Published Legal terms + Product tariff with approval evidence (test data only)."""
+    terms = draft_terms(version, term)
+    tariff = draft_tariff(plan)
+    for record in (terms, tariff):
+        record.record_approval(None)
+        record.publish(None)
     return terms, tariff
 
 
@@ -873,7 +951,221 @@ def pdf_pages(data: bytes) -> int:
     return len(re.findall(rb"/Type\s*/Page[^s]", data))
 
 
-@override_settings(SWITCH_ORDER_CONVERSION_ENABLED=True, SWITCH_DOCUMENTS_VALID_MINUTES=60)
+class ContractRegistryTests(SwitchTestBase):
+    """Group 2 (C3–C6): approved-content registry, Contract Recovery & Release v2.3."""
+
+    TERMS_URL = "/api/v1/switch/contract-terms/"
+
+    def plan_url(self, plan_id=None):
+        return f"/api/v1/switch/plans/{plan_id or self.plan.pk}/contract/"
+
+    # ── C3: provenance and lifecycle (T01, T09) ──
+
+    def test_only_published_content_is_used(self):
+        terms, tariff = draft_terms(), draft_tariff(self.plan)
+        self.assertIsNone(documents.find_sources(self.plan.pk, "12M").terms)  # draft
+        for record in (terms, tariff):
+            record.record_approval(None)
+        sources = documents.find_sources(self.plan.pk, "12M")
+        self.assertEqual((sources.terms, sources.tariff), (None, None))  # approved, not live
+        for record in (terms, tariff):
+            record.publish(None)
+        sources = documents.find_sources(self.plan.pk, "12M")
+        self.assertEqual((sources.terms, sources.tariff), (terms, tariff))
+        self.assertEqual(documents.missing_content(sources), [])
+
+    def test_approval_needs_evidence(self):
+        terms = draft_terms(approval_reference="", source_sha256="not-a-hash", effective_from=None)
+        with self.assertRaises(ValidationError) as ctx:
+            terms.record_approval(None)
+        text = " ".join(ctx.exception.messages)
+        for needed in ("approval_reference", "source_sha256", "effective_from"):
+            self.assertIn(needed, text)
+        terms.refresh_from_db()
+        self.assertEqual(terms.state, "draft")
+
+    def test_approval_needs_every_field(self):
+        terms = draft_terms(adr_scheme="  ")
+        with self.assertRaises(ValidationError) as ctx:
+            terms.record_approval(None)
+        self.assertIn("adr_scheme", " ".join(ctx.exception.messages))
+        ContractTermRule.objects.filter(terms=terms).update(renewal="")
+        self.assertIn("rule 12M.renewal", ContractTerms.objects.get().approval_problems())
+
+    def test_publish_only_after_approval(self):
+        terms = draft_terms()
+        with self.assertRaises(ValidationError):
+            terms.publish(None)
+
+    def test_effective_dates_and_retiring(self):
+        today = timezone.localdate()
+        old = draft_terms("T-1", effective_from=today - timedelta(days=30))
+        new = draft_terms("T-2", effective_from=today + timedelta(days=1))
+        for record in (old, new):
+            record.record_approval(None)
+            record.publish(None)
+        self.assertEqual(ContractTerms.current(), old)  # T-2 not in effect yet
+        self.assertEqual(ContractTerms.current(today + timedelta(days=1)), new)
+        old.retire()
+        self.assertIsNone(ContractTerms.current())
+        self.assertEqual(old.effective_to, today)
+        self.assertEqual(old.state, "retired")
+
+    def test_return_to_draft_only_if_never_published(self):
+        terms = draft_terms()
+        terms.record_approval(None)
+        terms.return_to_draft()
+        self.assertEqual((terms.state, terms.approved_at), ("draft", None))
+        terms.record_approval(None)
+        terms.publish(None)
+        with self.assertRaises(ValidationError):
+            terms.return_to_draft()
+
+    # ── C4 / C5: tariff versions, rollover and price changes (T02, T03) ──
+
+    def test_tariff_must_answer_rollover_and_price_changes(self):
+        tariff = draft_tariff(self.plan, rollover_applies=None, price_changes_apply=None, plan_sku="")
+        problems = " ".join(tariff.approval_problems())
+        for needed in ("rollover_applies", "price_changes_apply", "plan_sku"):
+            self.assertIn(needed, problems)
+
+    def test_formula_price_rises_are_refused(self):
+        for wording in ("Rises each April by CPI + 3.9%.", "An annual 4.5 per cent increase applies.",
+                        "Linked to the Retail Prices Index."):
+            with self.subTest(wording=wording):
+                tariff = draft_tariff(self.plan, version=f"P-{abs(hash(wording))}", scheduled_price_changes=wording)
+                self.assertTrue(any("CPI/RPI" in p for p in tariff.approval_problems()))
+
+    def test_price_change_rows_must_match_the_answer(self):
+        tariff = draft_tariff(self.plan, price_changes_apply=True,
+                              scheduled_price_changes="Your monthly price will change as follows:")
+        self.assertTrue(any("add the dated" in p for p in tariff.approval_problems()))
+
+        PlanPriceChange.objects.create(tariff=tariff, effective_date=tariff.effective_from, new_price=Decimal("0"))
+        problems = " ".join(tariff.approval_problems())
+        self.assertIn("more than £0.00", problems)
+        self.assertIn("after the tariff's effective_from", problems)
+
+        PlanPriceChange.objects.all().delete()
+        PlanPriceChange.objects.create(tariff=tariff, effective_date=tariff.effective_from + timedelta(days=200),
+                                       new_price=Decimal("10.50"))
+        self.assertEqual(tariff.approval_problems(), [])
+
+        PlanTariff.objects.filter(pk=tariff.pk).update(price_changes_apply=False)
+        tariff.refresh_from_db()
+        self.assertTrue(any("answer is No" in p or "is No" in p for p in tariff.approval_problems()))
+
+    def test_tariff_versions_over_time(self):
+        today = timezone.localdate()
+        first = draft_tariff(self.plan, "P-1", effective_from=today - timedelta(days=10))
+        second = draft_tariff(self.plan, "P-2", effective_from=today + timedelta(days=5))
+        for record in (first, second):
+            record.record_approval(None)
+            record.publish(None)
+        self.assertEqual(PlanTariff.current(self.plan.pk), first)
+        self.assertEqual(PlanTariff.current(self.plan.pk, today + timedelta(days=5)), second)
+
+    # ── Admin ──
+
+    def test_admin_needs_the_approval_permission(self):
+        terms = draft_terms()
+        staff = User.objects.create_user("clerk", "clerk@example.com", "pw", is_staff=True)
+        for codename in ("view_contractterms", "change_contractterms"):
+            staff.user_permissions.add(Permission.objects.get(codename=codename))
+        admin_client = APIClient()
+        admin_client.force_login(staff)
+        admin_client.post("/admin/switch/contractterms/", {
+            "action": "record_approval", "_selected_action": [terms.pk]})
+        self.assertEqual(ContractTerms.objects.get().state, "draft")
+
+        staff.user_permissions.add(Permission.objects.get(codename="approve_contractterms"))
+        staff = User.objects.get(pk=staff.pk)  # fresh permission cache
+        admin_client.force_login(staff)
+        admin_client.post("/admin/switch/contractterms/", {
+            "action": "record_approval", "_selected_action": [terms.pk]})
+        terms.refresh_from_db()
+        self.assertEqual((terms.state, terms.approved_by), ("approved", staff))
+
+        # Publishing is a separate permission.
+        admin_client.post("/admin/switch/contractterms/", {"action": "publish", "_selected_action": [terms.pk]})
+        self.assertEqual(ContractTerms.objects.get().state, "approved")
+
+    def test_admin_shows_what_is_missing_and_freezes_approved_content(self):
+        terms = draft_terms(adr_scheme="")
+        admin_user = User.objects.create_superuser("ops", "ops@example.com", "pw")
+        admin_client = APIClient()
+        admin_client.force_login(admin_user)
+        resp = admin_client.post("/admin/switch/contractterms/", {
+            "action": "record_approval", "_selected_action": [terms.pk]}, follow=True)
+        self.assertContains(resp, "adr_scheme")
+        self.assertEqual(ContractTerms.objects.get().state, "draft")
+
+        page = admin_client.get(f"/admin/switch/contractterms/{terms.pk}/change/").content.decode()
+        self.assertIn('name="adr_scheme"', page)  # draft: editable
+        ContractTerms.objects.filter(pk=terms.pk).update(adr_scheme="Approved ADR wording.")
+        admin_client.post("/admin/switch/contractterms/", {
+            "action": "record_approval", "_selected_action": [terms.pk]})
+        page = admin_client.get(f"/admin/switch/contractterms/{terms.pk}/change/").content.decode()
+        self.assertNotIn('name="adr_scheme"', page)  # approved: read-only
+        self.assertNotIn('name="source_file"', page)
+
+    def test_attaching_the_master_records_its_checksum(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from apps.switch.admin import ApprovedContentForm
+
+        class Form(ApprovedContentForm):
+            class Meta:
+                model = ContractTerms
+                fields = ["version", "source_document", "source_sha256"]
+
+        content = b"%PDF signed master"
+        form = Form(data={"version": "T-9"}, files={"source_file": SimpleUploadedFile("Signed CI 2023.pdf", content)})
+        self.assertTrue(form.is_valid(), form.errors)
+        terms = form.save()
+        self.assertEqual(terms.source_document, "Signed CI 2023.pdf")
+        self.assertEqual(terms.source_sha256, documents.sha256(content))
+
+    # ── C6: public endpoints ──
+
+    def test_terms_endpoint_only_serves_published_content(self):
+        resp = self.client.get(self.TERMS_URL)
+        self.assertEqual((resp.status_code, resp.data["code"]), (404, "NOT_AVAILABLE"))
+        draft_terms()
+        self.assertEqual(self.client.get(self.TERMS_URL).status_code, 404)  # drafts never served
+
+        approved_contract_content(self.plan, version="T-2")
+        resp = self.client.get(self.TERMS_URL)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data["data"]
+        self.assertEqual(data["version"], "T-2")
+        self.assertEqual(data["terms"]["adr_scheme"], "Approved adr scheme.")
+        self.assertEqual(data["issuer"]["legal_name"], "Zoiko Mobile UK Ltd")
+        self.assertIn("12M", data["term_rules"])
+        body = resp.content.decode()
+        for internal in ("approval_reference", "LEGAL-SIGNOFF", "source_sha256", "source_location", "document_owner"):
+            self.assertNotIn(internal, body)
+
+    def test_plan_contract_endpoint(self):
+        resp = self.client.get(self.plan_url())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual((resp.data["data"]["contract_ready"], resp.data["data"]["tariff"]), (False, None))
+
+        terms, tariff = approved_contract_content(self.plan)
+        data = self.client.get(self.plan_url()).data["data"]
+        self.assertTrue(data["contract_ready"])
+        self.assertEqual(data["ready_terms"], ["12M"])  # only 12M has an approved term rule
+        self.assertEqual(data["tariff"]["version"], "P-1")
+        self.assertFalse(data["tariff"]["rollover_applies"])
+        self.assertNotIn("source_sha256", str(data))
+
+        self.assertEqual(self.client.get(self.plan_url(999999)).status_code, 404)
+        Plan.objects.filter(pk=self.plan.pk).update(is_active=False)
+        self.assertEqual(self.client.get(self.plan_url()).data["code"], "PLAN_NOT_FOUND")
+
+
+@override_settings(SWITCH_ORDER_CONVERSION_ENABLED=True, ADD_LINE_SUPPLIER_WRITES_ENABLED=True,
+                   SWITCH_DOCUMENTS_VALID_MINUTES=60, BACKEND_URL="https://api.zoiko.test")
 class ContractDocumentsTests(SwitchTestBase):
     """Milestone 4 · B2: order preview and pre-contract documents."""
 
@@ -962,6 +1254,28 @@ class ContractDocumentsTests(SwitchTestBase):
         self.assertEqual(len(mail.outbox[0].attachments), 2)
         self.assertNotIn("ABC123456", mail.outbox[0].subject + mail.outbox[0].body)
 
+    def test_dated_price_rises_printed_in_pounds_and_evidence_recorded(self):
+        """T03/T05: rises in £/p with dates for this plan length only; the pack
+        records which approved versions it used."""
+        today = timezone.localdate()
+        rises = draft_tariff(self.plan, "P-2", price_changes_apply=True,
+                             scheduled_price_changes="Your monthly price will change on these dates:")
+        PlanPriceChange.objects.create(tariff=rises, term="12M", effective_date=date(today.year + 1, 4, 1),
+                                       new_price=Decimal("9.50"))
+        PlanPriceChange.objects.create(tariff=rises, term="24M", effective_date=date(today.year + 1, 4, 1),
+                                       new_price=Decimal("8.40"))
+        rises.record_approval(None)
+        rises.publish(None)  # newer publish wins on the same effective date
+
+        self.assertEqual(self.issue().status_code, 201)
+        content = SwitchContractPack.objects.get().content
+        self.assertEqual(content["tariff_version"], "P-2")
+        self.assertEqual([r["new_price"] for r in content["price_changes"]], ["9.50"])  # 12M only
+        self.assertIn(f"from 1 April {today.year + 1}: £9.50 per month", content["price"]["scheduled_changes"])
+        self.assertNotIn("8.40", str(content["price"]))
+        self.assertEqual(content["provenance"]["tariff"]["approval_reference"], "LEGAL-SIGNOFF-2023-014")
+        self.assertEqual(content["provenance"]["terms"]["source_sha256"], "a" * 64)
+
     def test_same_documents_until_something_changes(self):
         first = self.issue().data["data"]
         again = self.issue().data["data"]
@@ -987,23 +1301,72 @@ class ContractDocumentsTests(SwitchTestBase):
         self.assertIsNone(self.client.get(self.url("documents/")).data["data"])
         self.assertNotEqual(self.issue().data["data"]["id"], first["id"])
 
-    def test_missing_content_blocks_issue(self):
+    def test_preview_reports_missing_content_without_side_effects(self):
+        ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="  ")
+        self.assertFalse(self.client.get(self.url("order/")).data["data"]["documents_available"])
+        self.assertEqual(SwitchRequest.objects.get().status, S.READY_FOR_ORDER)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_missing_content_parks_request_and_alerts_ops(self):
+        """Engineering Decision v2.1 §04: no documents or payment; request
+        saved as "Action needed — internal"; fault logged; Ops alerted."""
         ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="  ")
         resp = self.issue()
         self.assertEqual((resp.status_code, resp.data["code"]), (503, "DOCUMENTS_UNAVAILABLE"))
-        self.assertIn("No order has been placed", resp.data["message"])
+        self.assertEqual(resp.data["message"], ordering.DOCUMENTS_FAILED_MESSAGE)
+        self.assertNotIn("adr", resp.data["message"])  # internal reason never shown
         self.assertFalse(SwitchContractPack.objects.exists())
-        self.assertFalse(self.client.get(self.url("order/")).data["data"]["documents_available"])
 
-        ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="ok")
-        PlanTariff.objects.update(approved=False)
+        sr = SwitchRequest.objects.get()
+        self.assertEqual((sr.status, sr.action_reason, sr.action_owner),
+                         (S.ACTION_NEEDED, "contract_docs", "operations"))
+        self.assertIn("terms.adr_scheme", sr.ops_note)
+        self.assertEqual(services.next_action(sr), "none")  # nothing for the customer to do
+        self.assertFalse(sr.needs_customer)
+
+        self.assertEqual(len(mail.outbox), 1)
+        alert = mail.outbox[0]
+        self.assertIn(sr.reference, alert.subject)
+        self.assertIn("terms.adr_scheme", alert.alternatives[0][0])
+        self.assertNotIn("jane@example.com", alert.alternatives[0][0])
+
+        # Trying again while parked: same safe message, no second alert.
+        for again in (self.issue(), self.client.get(self.url("order/"))):
+            self.assertEqual((again.status_code, again.data["code"]), (503, "DOCUMENTS_UNAVAILABLE"))
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_unpublished_tariff_parks_request(self):
+        PlanTariff.objects.update(state="approved")
         self.assertEqual(self.issue().status_code, 503)
+        self.assertIn("published PlanTariff", SwitchRequest.objects.get().ops_note)
 
     def test_summary_must_fit_one_page(self):
         PlanTariff.objects.update(fair_use="Very long fair use wording. " * 400)
         resp = self.issue()
         self.assertEqual((resp.status_code, resp.data["code"]), (503, "DOCUMENTS_UNAVAILABLE"))
         self.assertFalse(SwitchContractPack.objects.exists())
+        sr = SwitchRequest.objects.get()
+        self.assertEqual(sr.action_reason, "contract_docs")
+        self.assertIn("could not be rendered", sr.ops_note)
+
+    def test_ops_reopen_only_once_content_is_fixed(self):
+        ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="")
+        self.issue()
+        admin_user = User.objects.create_superuser("ops", "ops@example.com", "pw")
+        admin_client = APIClient()
+        admin_client.force_login(admin_user)
+        reopen = {"action": "mark_ready_for_order", "_selected_action": [self.sr.pk]}
+
+        resp = admin_client.post("/admin/switch/switchrequest/", reopen, follow=True)
+        self.assertContains(resp, "kept on hold")
+        self.assertEqual(SwitchRequest.objects.get().status, S.ACTION_NEEDED)
+
+        ContractTerms.objects.filter(pk=self.terms.pk).update(adr_scheme="Approved ADR wording.")
+        mail.outbox.clear()
+        admin_client.post("/admin/switch/switchrequest/", reopen)
+        self.assertEqual(SwitchRequest.objects.get().status, S.READY_FOR_ORDER)
+        self.assertEqual(len(mail.outbox), 1)  # new continuation link: "we'll contact you"
+        self.assertEqual(self.issue().status_code, 201)
 
     def test_download(self):
         doc_data = self.issue().data["data"]["documents"][0]
@@ -1152,6 +1515,46 @@ class ConsentAndCheckoutTests(CheckoutTestBase):
         self.assertEqual(self.consent(pack).status_code, 200)  # harmless repeat
         self.assertEqual(SwitchContractConsent.objects.count(), 1)
 
+    def test_provision_is_recorded_and_copied_into_consent(self):
+        """C9 / T04: documents provided (account + email, downloads logged)
+        before express consent; opening a PDF isn't required."""
+        pack = self.issue()
+        events = list(SwitchContractProvision.objects.values_list("method", "succeeded", "document"))
+        self.assertEqual(events, [("account", True, None), ("email", True, None)])
+        self.assertEqual(SwitchContractProvision.objects.get(method="email").recipient_masked, "j***@example.com")
+
+        self.client.get(pack["documents"][0]["download_url"])
+        download = SwitchContractProvision.objects.get(method="download")
+        self.assertEqual(str(download.document.public_id), pack["documents"][0]["id"])
+        self.assertEqual(download.actor, self.user)
+
+        self.assertEqual(self.consent(pack).status_code, 200)
+        provision = SwitchContractConsent.objects.get().provision
+        self.assertEqual([p["method"] for p in provision], ["account", "email", "download"])
+        self.assertTrue(all(p["succeeded"] for p in provision))
+
+    def test_failed_email_is_recorded_and_account_copy_still_counts(self):
+        with mock.patch("apps.switch.emails.EmailMultiAlternatives.send", side_effect=RuntimeError("smtp")):
+            pack = self.issue()
+        self.assertFalse(SwitchContractProvision.objects.get(method="email").succeeded)
+        self.assertEqual(self.consent(pack).status_code, 200)
+        self.assertEqual([p["method"] for p in SwitchContractConsent.objects.get().provision], ["account"])
+
+    def test_no_consent_without_provision_evidence(self):
+        pack = self.issue()
+        SwitchContractProvision.objects.all().delete()  # simulate missing evidence
+        resp = self.consent(pack)
+        self.assertEqual((resp.status_code, resp.data["code"]), (409, "DOCUMENTS_NOT_PROVIDED"))
+        self.assertFalse(SwitchContractConsent.objects.exists())
+
+    def test_provision_evidence_is_immutable(self):
+        self.issue()
+        event = SwitchContractProvision.objects.first()
+        with self.assertRaises(ImmutableRecord):
+            event.save()
+        with self.assertRaises(ImmutableRecord):
+            event.delete()
+
     def test_consent_must_match_issued_documents(self):
         pack = self.issue()
         wrong = [{"id": d["id"], "sha256": "0" * 64} for d in pack["documents"]]
@@ -1221,6 +1624,49 @@ class ConsentAndCheckoutTests(CheckoutTestBase):
         self.assertEqual((resp.status_code, resp.data["code"]), (409, "PRICE_CHANGED"))
         self.assertFalse(AddLineOrder.objects.exists())
 
+    def test_checkout_refused_while_supplier_writes_off(self):
+        """C2: never take payment for a line that can't be activated."""
+        self.consent(self.issue())
+        with override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=False):
+            resp = self.checkout()
+        self.assertEqual((resp.status_code, resp.data["code"]), (404, "NOT_AVAILABLE"))
+        self.create_intent.assert_not_called()
+        self.assertFalse(AddLineOrder.objects.exists())
+        self.assertEqual(SwitchRequest.objects.get().status, S.READY_FOR_ORDER)  # request preserved
+
+        with override_settings(ADD_LINE_SUPPLIER_WRITES_ENABLED=False,
+                               SWITCH_ORDERS_WITHOUT_SUPPLIER_WRITES_APPROVED=True):
+            self.assertEqual(self.checkout().status_code, 201)  # approved exception only
+
+    def test_expired_code_is_never_sent_to_transatel(self):
+        """C11: submit re-checks the code's 30-day life, held work included."""
+        from apps.add_line.services import porting
+
+        line = Line.objects.create(owner=self.user, sim=Sim.objects.get(), plan=self.plan, term="12M",
+                                   status=Line.Status.ACTIVE)
+        port = PortRequest.objects.create(
+            line=line, code_type="PAC", encrypted_code=pac.encrypt("ABC123456"),
+            portability_msisdn="447700900123", code_expires_at=timezone.localdate(),
+        )
+        service = fake_transatel()
+        with mock.patch("apps.add_line.services.porting.get_service", return_value=service):
+            porting.submit(port)
+        port.refresh_from_db()
+        self.assertEqual(port.status, PortRequest.Status.ERROR)
+        self.assertEqual(port.last_error["detail"], porting.CODE_EXPIRED_DETAIL)
+        service.request_uk_port_in.assert_not_called()
+
+    def test_transfer_refuses_a_code_already_past_its_life(self):
+        from apps.add_line.services import porting
+
+        line = Line.objects.create(owner=self.user, sim=Sim.objects.get(), plan=self.plan, term="12M",
+                                   status=Line.Status.PENDING_ACTIVATION)
+        with self.assertRaises(porting.PortError) as ctx:
+            porting.create_request(self.user, line, code_type="PAC", code="ABC123456", msisdn="07700900123",
+                                   code_received_at=timezone.now() - timedelta(days=31))
+        self.assertEqual(ctx.exception.code, "CODE_EXPIRED")
+        self.assertFalse(PortRequest.objects.exists())
+
     def test_stripe_failure_places_no_order(self):
         self.consent(self.issue())
         self.create_intent.side_effect = RuntimeError("stripe down")
@@ -1242,6 +1688,8 @@ class ConsentAndCheckoutTests(CheckoutTestBase):
         port = PortRequest.objects.get()
         self.assertEqual((port.code_type, port.portability_msisdn), ("PAC", "447700900123"))
         self.assertEqual(pac.decrypt(port.encrypted_code), "ABC123456")
+        # The code's 30-day life runs from when the request received it (C11).
+        self.assertEqual(port.code_expires_at, timezone.localdate(sr.code_received_at) + timedelta(days=30))
         self.assertEqual(sr.encrypted_code, "")  # held in one place only
         service.request_uk_port_in.assert_called_once()
 

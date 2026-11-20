@@ -1,8 +1,13 @@
 """Contract Summary and Contract Information PDFs (CTO documents 01 and 02, v1.0).
 
-* Every value comes from the frozen quote, the request, the approved
-  ContractTerms (Legal) and the approved PlanTariff (Product). Nothing is
-  taken from the public site or filled with a default.
+* Every value comes from the frozen quote, the request, the live (published,
+  in-effect) ContractTerms (Legal) and PlanTariff (Product/Finance). Nothing
+  is taken from the public site, the frontend's draft copy or a default
+  (Contract Recovery & Release decision v2.3 §5).
+* Scheduled price rises are printed in £/p with their dates, from the
+  tariff's price-change rows (Ofcom, 17 Jan 2025).
+* Each pack's content records which approved versions it used and their
+  approval evidence, so it can be traced later (v2.3 §5, T05).
 * A missing value stops issue (`MissingContent`): no "TBC", no £0.00, no
   placeholder ever reaches a customer (CS release rule, CI-13/CI-14).
 * The summary must fit one A4 page at 10 pt or larger (CS-03); if the
@@ -12,7 +17,7 @@
 
 import hashlib
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
 
@@ -26,26 +31,18 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 from apps.add_line.models import SimType, Term
 
-from .models import ContractTerms, ContractTermRule, PlanTariff, SwitchRequest
+from django.db.models import Q
 
-SUMMARY_TEMPLATE_VERSION = "CS-1.0"
-INFORMATION_TEMPLATE_VERSION = "CI-1.0"
+from .models import ContractTerms, ContractTermRule, PlanPriceChange, PlanTariff, SwitchRequest
 
-_TERMS_FIELDS = [
-    "legal_name", "company_number", "registered_office", "support_phone", "support_email", "website",
-    "customer_care_hours", "complaints_route", "complaints_code", "adr_scheme", "compensation",
-    "device", "service_availability", "quality_and_sla", "traffic_management", "performance_remedies",
-    "payment_method", "billing_start", "usage_controls", "provisioning",
-    "cancellation", "cooling_off", "prepaid_credit_refund",
-    "data_categories", "privacy_policy", "security_incidents", "directory_listing",
-    "emergency_access", "accessibility",
-]
-_RULE_FIELDS = ["minimum_commitment", "renewal", "early_termination"]
-_TARIFF_FIELDS = [
-    "uk_data", "uk_minutes", "uk_texts", "fair_use", "after_allowance", "rollover",
-    "roaming_zone", "roaming_allowance", "roaming_rates", "speeds", "extra_charges",
-    "one_off_charges", "scheduled_price_changes",
-]
+SUMMARY_TEMPLATE_VERSION = "CS-1.1"
+INFORMATION_TEMPLATE_VERSION = "CI-1.1"
+
+_TERMS_FIELDS = list(ContractTerms.TEXT_FIELDS)  # first 6 = issuer
+_RULE_FIELDS = list(ContractTermRule.TEXT_FIELDS)
+_TARIFF_FIELDS = list(PlanTariff.TEXT_FIELDS)
+_PROVENANCE_FIELDS = ("version", "approval_reference", "approval_date", "document_owner", "source_document",
+                      "source_sha256", "effective_from")
 
 _ROUTE_TEXT = {
     SwitchRequest.Route.KEEP_PAC: "Keep your number: transfer with a PAC",
@@ -71,20 +68,26 @@ class Sources:
     terms: ContractTerms | None
     rule: ContractTermRule | None
     tariff: PlanTariff | None
+    term: str = ""
+    price_changes: list[PlanPriceChange] = field(default_factory=list)
 
 
-def find_sources(plan_id, term) -> Sources:
-    terms = ContractTerms.current()
+def find_sources(plan_id, term, today=None) -> Sources:
+    """The live (published, in-effect) content for this plan and plan length."""
+    terms = ContractTerms.current(today)
     rule = terms.term_rules.filter(term=term).first() if terms else None
-    tariff = PlanTariff.objects.filter(plan_id=plan_id, approved=True).first()
-    return Sources(terms, rule, tariff)
+    tariff = PlanTariff.current(plan_id, today)
+    changes = list(tariff.price_changes.filter(Q(term="") | Q(term=term))) if tariff else []
+    return Sources(terms, rule, tariff, term, changes)
 
 
 def missing_content(sources: Sources) -> list[str]:
-    """Names of everything blank or unapproved, for ops (never shown to customers)."""
+    """Names of everything missing, blank or not live, for ops (never shown
+    to customers). Published content was already checked when it was
+    approved; this re-checks before anything is issued."""
     missing = []
     if not sources.terms:
-        missing.append("approved ContractTerms")
+        missing.append("published ContractTerms")
     else:
         missing += [f"terms.{f}" for f in _TERMS_FIELDS if not str(getattr(sources.terms, f) or "").strip()]
         if not sources.rule:
@@ -92,10 +95,16 @@ def missing_content(sources: Sources) -> list[str]:
         else:
             missing += [f"rule.{f}" for f in _RULE_FIELDS if not (getattr(sources.rule, f) or "").strip()]
     if not sources.tariff:
-        missing.append("approved PlanTariff for this plan")
+        missing.append("published PlanTariff for this plan")
     else:
-        missing += [f"tariff.{f}" for f in _TARIFF_FIELDS if not (getattr(sources.tariff, f) or "").strip()]
+        missing += [f"tariff.{p}" for p in sources.tariff.content_problems()]
+        if sources.tariff.price_changes_apply and not sources.price_changes:
+            missing.append("tariff price changes for this plan length")
     return missing
+
+
+def contract_ready(plan_id, term, today=None) -> bool:
+    return not missing_content(find_sources(plan_id, term, today))
 
 
 # ── Content ───────────────────────────────────────────────────────────────────
@@ -120,6 +129,38 @@ def _national(msisdn):
     return "0" + msisdn[2:] if msisdn and msisdn.startswith("44") else msisdn
 
 
+def _long_date(d):
+    return f"{d.day} {d:%B %Y}"
+
+
+def _provenance(record) -> dict:
+    """Which approved version was used and its approval evidence (stored in
+    the pack's content only; not printed)."""
+    out = {}
+    for f in _PROVENANCE_FIELDS:
+        value = getattr(record, f)
+        out[f] = value.isoformat() if hasattr(value, "isoformat") else value
+    return out
+
+
+def _price_changes(sources: Sources, term) -> tuple[list[dict], str]:
+    """Dated £/p rises for this plan length, and the sentence the documents
+    print: the approved wording followed by each date and new price."""
+    rows = [
+        {
+            "term": change.term or "all",
+            "effective_date": change.effective_date.isoformat(),
+            "new_price": str(change.new_price),
+            "text": f"from {_long_date(change.effective_date)}: {_gbp(change.new_price)} {_period(term)}",
+        }
+        for change in sorted(sources.price_changes, key=lambda c: c.effective_date)
+    ]
+    text = sources.tariff.scheduled_price_changes.strip()
+    if rows:
+        text = f"{text} " + "; ".join(r["text"] for r in rows) + " (including VAT)."
+    return rows, text
+
+
 def build_content(switch: SwitchRequest, quote: dict, sources: Sources, *, pack_reference,
                   issued_at, offer_valid_until) -> dict:
     missing = missing_content(sources)
@@ -136,14 +177,21 @@ def build_content(switch: SwitchRequest, quote: dict, sources: Sources, *, pack_
     transfer = ""
     if switch.switch_route != SwitchRequest.Route.NEW_KEEP and switch.port_number:
         transfer = _national(switch.port_number)
+    price_changes, price_changes_text = _price_changes(sources, term)
 
     return {
         "issuer": {f: getattr(terms, f) for f in _TERMS_FIELDS[:6]},
         "terms": {f: getattr(terms, f) for f in _TERMS_FIELDS[6:]},
         "terms_version": terms.version,
         "rule": {f: getattr(rule, f) for f in _RULE_FIELDS},
-        "tariff": {f: getattr(tariff, f) for f in _TARIFF_FIELDS},
+        "tariff": {
+            **{f: getattr(tariff, f) for f in _TARIFF_FIELDS},
+            "rollover_applies": tariff.rollover_applies,
+            "price_changes_apply": tariff.price_changes_apply,
+        },
         "tariff_version": tariff.version,
+        "price_changes": price_changes,
+        "provenance": {"terms": _provenance(terms), "tariff": _provenance(tariff)},
         "customer": {
             "name": f"{switch.first_name} {switch.last_name}".strip(),
             # Full consumer protection unless a verified business opt-out exists (CI-06).
@@ -167,6 +215,7 @@ def build_content(switch: SwitchRequest, quote: dict, sources: Sources, *, pack_
             "first_payment_vat": _gbp(quote["vat_included"]),
             "vat_rate_percent": quote["vat_rate_percent"],
             "first_renewal_date": quote["first_renewal_date"],
+            "scheduled_changes": price_changes_text,
         },
         "references": {
             "contract_reference": pack_reference,
@@ -257,7 +306,7 @@ def render_summary(c: dict) -> bytes:
         _b("Core subscription (including VAT):", price["core"]),
         _b("One-off charges:", f"{tariff['one_off_charges']}  Delivery: {price['delivery']}."),
         _b("Promotion:", price["promotion"]),
-        _b("Scheduled core subscription changes:", tariff["scheduled_price_changes"]),
+        _b("Scheduled core subscription changes:", price["scheduled_changes"]),
         _b("Out-of-allowance, premium, international and roaming charges:", tariff["extra_charges"]),
         _p("Duration, renewal and termination", _H2),
         _b("Minimum commitment:", rule["minimum_commitment"]),
@@ -316,6 +365,7 @@ def render_information(c: dict) -> bytes:
             ("Date provided", ref["issued_at"]),
             ("Customer", f"{cust['name']} ({cust['category']})"),
             ("Selected plan", plan["name"]),
+            ("Plan SKU / tariff", f"{tariff['plan_sku']} / {tariff['tariff_code']} (version {c['tariff_version']})"),
             ("Contract duration", rule["minimum_commitment"]),
             ("SIM", plan["sim_type"]),
             ("Number arrangement", plan["switch_option"]),
@@ -341,7 +391,8 @@ def render_information(c: dict) -> bytes:
         _rows([
             ("Core recurring subscription", f"{price['core']}, including VAT"),
             ("Promotion", price["promotion"]),
-            ("Dated subscription changes", tariff["scheduled_price_changes"]),
+            ("Dated subscription changes", price["scheduled_changes"]),
+            ("VAT", tariff["vat_basis"]),
             ("One-off costs", f"{tariff['one_off_charges']} Delivery: {price['delivery']}."),
             ("First payment", f"{price['first_payment']} including VAT of {price['first_payment_vat']} "
                               f"({price['vat_rate_percent']}%)."),

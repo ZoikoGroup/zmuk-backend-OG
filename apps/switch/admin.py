@@ -1,5 +1,9 @@
+import hashlib
+
+from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from django.db.models import Q
 
 from django.utils import timezone
@@ -8,11 +12,13 @@ from . import continuation, documents, receipts, services
 from .models import (
     ContractTermRule,
     ContractTerms,
+    PlanPriceChange,
     PlanTariff,
     SwitchContinuationToken,
     SwitchContractConsent,
     SwitchContractDocument,
     SwitchContractPack,
+    SwitchContractProvision,
     SwitchDocumentDelivery,
     SwitchFeedback,
     SwitchPaymentAdjustment,
@@ -107,7 +113,7 @@ class SwitchRequestAdmin(admin.ModelAdmin):
         "reference", "user", "existing_account_email", "idempotency_key",
         "code_type", "code_state", "code_received_at", "code_purged_at",
         "quote_snapshot", "quote_hash", "precontract_documents_sent_at",
-        "consent_version", "consented_at", "consent_ip", "consent_user_agent",
+        "consent_version", "consent_statement", "consented_at", "consent_ip", "consent_user_agent",
         "converted_at", "claimed_at", "created_at", "updated_at",
     )
     raw_id_fields = ("plan", "order", "line")
@@ -137,7 +143,8 @@ class SwitchRequestAdmin(admin.ModelAdmin):
         (
             "Consent",
             {"fields": ("transfer_authorised", "timeline_acknowledged", "terms_accepted",
-                        "consent_version", "consented_at", "consent_ip", "consent_user_agent",
+                        "consent_version", "consent_statement", "consented_at", "consent_ip",
+                        "consent_user_agent",
                         "opt_in_news", "opt_in_texts")},
         ),
         (
@@ -201,6 +208,18 @@ class SwitchRequestAdmin(admin.ModelAdmin):
 
     @admin.action(description="Move to: ready for order (emails the continuation link if enabled)")
     def mark_ready_for_order(self, request, queryset):
+        # A request parked for missing contract content only reopens once the
+        # approved terms and tariff for its plan are complete; otherwise the
+        # customer would hit the same failure again.
+        still_blocked = [
+            s.pk for s in queryset.filter(status=S.ACTION_NEEDED,
+                                          action_reason=SwitchRequest.ActionReason.CONTRACT_DOCS)
+            if documents.missing_content(documents.find_sources(s.plan_id, s.contract_term))
+        ]
+        if still_blocked:
+            self.message_user(request, f"{len(still_blocked)} request(s) kept on hold: their plan's approved "
+                                       "contract terms / tariff are still incomplete.", messages.WARNING)
+            queryset = queryset.exclude(pk__in=still_blocked)
         moved = self._bulk_status(request, queryset, S.READY_FOR_ORDER,
                                   (S.RECEIVED, S.VALIDATING, S.ACTION_NEEDED))
         if moved and continuation.enabled():
@@ -209,8 +228,8 @@ class SwitchRequestAdmin(admin.ModelAdmin):
     @admin.action(description="Send a new continuation link (ready-for-order requests)")
     def send_continuation_link(self, request, queryset):
         if not continuation.enabled():
-            self.message_user(request, "Online order completion is switched off "
-                                       "(SWITCH_ORDER_CONVERSION_ENABLED).", messages.WARNING)
+            self.message_user(request, f"Online order completion is switched off "
+                                       f"({continuation.disabled_reason()}).", messages.WARNING)
             return
         self._send_links(request, queryset)
 
@@ -227,64 +246,187 @@ class SwitchRequestAdmin(admin.ModelAdmin):
 
 # ── Milestone 4 · B2: contract content and issued documents ───────────────────
 
-class _ApprovedIsFrozen:
-    """Approved content can't be edited in place: create a new version, so the
-    record of what a customer was given never changes (CS-10)."""
+SOURCE_FILE_MAX_BYTES = 25 * 1024 * 1024
+
+
+class ApprovedContentForm(forms.ModelForm):
+    """Attaching the signed master fills in its file name and SHA-256. The file
+    itself is not stored here: the controlled copy stays in the restricted
+    repository named in `source_location` (v2.3 §1A)."""
+
+    source_file = forms.FileField(
+        required=False,
+        help_text="Optional: choose the signed / approved master file to record its name and SHA-256 "
+                  "(the file is not uploaded or kept).",
+    )
+
+    def clean(self):
+        cleaned = super().clean()
+        upload = cleaned.get("source_file")
+        if upload:
+            if upload.size > SOURCE_FILE_MAX_BYTES:
+                raise forms.ValidationError({"source_file": "That file is larger than 25 MB."})
+            digest = hashlib.sha256()
+            for chunk in upload.chunks():
+                digest.update(chunk)
+            cleaned["source_document"] = upload.name[:255]
+            cleaned["source_sha256"] = digest.hexdigest()
+        if cleaned.get("source_sha256"):
+            cleaned["source_sha256"] = cleaned["source_sha256"].strip().lower()
+        return cleaned
+
+
+class _ApprovalAdmin(admin.ModelAdmin):
+    """Draft → approved → published → retired, by admin action only.
+
+    Recording approval and publishing each need their own permission
+    (`approve_<model>`, `publish_<model>`). From approval on, the record is
+    read-only: a change is a new version, so the record of what a customer
+    was given never changes (CS-10, v2.3 §5).
+    """
+
+    form = ApprovedContentForm
+    LIFECYCLE_FIELDS = ("state", "approval_check", "approved_by", "approved_at", "published_by", "published_at",
+                        "retired_at")
+    EVIDENCE_FIELDSET = ("Approval evidence", {
+        "fields": ("approval_reference", "approval_date", "document_owner", "source_file", "source_document",
+                   "source_sha256", "source_location", "effective_from", "effective_to"),
+        "description": "Record the existing approval. Never fill this in from a draft, a competitor or "
+                       "generated text: missing approved content goes to Legal / Product.",
+    })
+    LIFECYCLE_FIELDSET = ("Status", {"fields": LIFECYCLE_FIELDS})
+    actions = ["record_approval", "publish", "retire", "return_to_draft"]
+
+    def _perm(self, request, kind):
+        return request.user.has_perm(f"{self.opts.app_label}.{kind}_{self.opts.model_name}")
+
+    def has_approve_permission(self, request):
+        return self._perm(request, "approve")
+
+    def has_publish_permission(self, request):
+        return self._perm(request, "publish")
+
+    def get_form(self, request, obj=None, **kwargs):
+        if obj and obj.frozen:
+            kwargs["form"] = forms.ModelForm  # read-only: no file field
+        return super().get_form(request, obj, **kwargs)
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = super().get_fieldsets(request, obj)
+        if obj and obj.frozen:
+            return [(name, {**opts, "fields": [f for f in opts["fields"] if f != "source_file"]})
+                    for name, opts in fieldsets]
+        return fieldsets
 
     def get_readonly_fields(self, request, obj=None):
-        if obj and obj.approved:
-            return [f.name for f in self.model._meta.fields]
-        return list(super().get_readonly_fields(request, obj))
+        if obj and obj.frozen:
+            return [f.name for f in self.model._meta.fields if f.name != "id"] + list(self.LIFECYCLE_FIELDS)
+        return list(self.LIFECYCLE_FIELDS)
+
+    def has_delete_permission(self, request, obj=None):
+        return super().has_delete_permission(request, obj) and not (obj and obj.frozen)
+
+    @admin.display(description="Approval check")
+    def approval_check(self, obj):
+        if not obj or not obj.pk:
+            return "Save the draft first."
+        if obj.state != obj.State.DRAFT:
+            return "—"
+        problems = obj.approval_problems()
+        return "Ready to record approval." if not problems else "Still needed: " + "; ".join(problems)
+
+    def _transition(self, request, queryset, method, done, *args):
+        ok = 0
+        for obj in queryset:
+            try:
+                getattr(obj, method)(*args)
+                ok += 1
+            except ValidationError as exc:
+                self.message_user(request, f"{obj}: " + "; ".join(exc.messages), messages.ERROR)
+        if ok:
+            self.message_user(request, f"{ok} version(s) {done}.", messages.SUCCESS)
+
+    @admin.action(description="Record approval (evidence required)", permissions=["approve"])
+    def record_approval(self, request, queryset):
+        self._transition(request, queryset, "record_approval", "approved", request.user)
+
+    @admin.action(description="Publish (use for customers from 'effective from')", permissions=["publish"])
+    def publish(self, request, queryset):
+        self._transition(request, queryset, "publish", "published", request.user)
+
+    @admin.action(description="Retire (stop using from today)", permissions=["publish"])
+    def retire(self, request, queryset):
+        self._transition(request, queryset, "retire", "retired")
+
+    @admin.action(description="Return to draft (approved, never published)", permissions=["approve"])
+    def return_to_draft(self, request, queryset):
+        self._transition(request, queryset, "return_to_draft", "returned to draft")
 
 
-class ContractTermRuleInline(admin.StackedInline):
+class _DraftOnlyInline:
+    """Child rows follow their parent: editable only while it is a draft."""
+
+    def has_change_permission(self, request, obj=None):
+        return super().has_change_permission(request, obj) and not (obj and obj.frozen)
+
+    def has_add_permission(self, request, obj=None):
+        return super().has_add_permission(request, obj) and not (obj and obj.frozen)
+
+    def has_delete_permission(self, request, obj=None):
+        return super().has_delete_permission(request, obj) and not (obj and obj.frozen)
+
+
+class ContractTermRuleInline(_DraftOnlyInline, admin.StackedInline):
     model = ContractTermRule
     extra = 0
 
-    def has_change_permission(self, request, obj=None):
-        return not (obj and obj.approved)
-
-    def has_add_permission(self, request, obj=None):
-        return not (obj and obj.approved)
-
-    def has_delete_permission(self, request, obj=None):
-        return not (obj and obj.approved)
-
 
 @admin.register(ContractTerms)
-class ContractTermsAdmin(_ApprovedIsFrozen, admin.ModelAdmin):
-    list_display = ("version", "approved", "approved_at", "approved_by", "missing_count")
-    readonly_fields = ("approved_by", "approved_at")
+class ContractTermsAdmin(_ApprovalAdmin):
+    list_display = ("version", "state", "effective_from", "effective_to", "approval_reference", "problem_count")
+    list_filter = ("state",)
     inlines = [ContractTermRuleInline]
+    fieldsets = (
+        ("Version", {"fields": ("version",)}),
+        _ApprovalAdmin.LIFECYCLE_FIELDSET,
+        _ApprovalAdmin.EVIDENCE_FIELDSET,
+        ("Issuer", {"fields": ContractTerms.TEXT_FIELDS[:6]}),
+        ("Approved wording", {"fields": ContractTerms.TEXT_FIELDS[6:]}),
+    )
 
-    @admin.display(description="Blank fields")
-    def missing_count(self, obj):
-        blank = [f for f in documents._TERMS_FIELDS if not str(getattr(obj, f) or "").strip()]
-        return len(blank) or "—"
+    @admin.display(description="Problems")
+    def problem_count(self, obj):
+        return len(obj.approval_problems()) if obj.state == obj.State.DRAFT else "—"
 
-    def save_model(self, request, obj, form, change):
-        if obj.approved and not obj.approved_at:
-            obj.approved_at, obj.approved_by = timezone.now(), request.user
-        super().save_model(request, obj, form, change)
 
-    def has_delete_permission(self, request, obj=None):
-        return not (obj and obj.approved)
+class PlanPriceChangeInline(_DraftOnlyInline, admin.TabularInline):
+    model = PlanPriceChange
+    extra = 0
 
 
 @admin.register(PlanTariff)
-class PlanTariffAdmin(_ApprovedIsFrozen, admin.ModelAdmin):
-    list_display = ("plan", "version", "approved", "approved_at")
-    list_filter = ("approved",)
-    readonly_fields = ("approved_at",)
+class PlanTariffAdmin(_ApprovalAdmin):
+    list_display = ("plan", "version", "state", "plan_sku", "tariff_code", "effective_from", "effective_to",
+                    "problem_count")
+    list_filter = ("state",)
+    search_fields = ("plan__name", "plan_sku", "tariff_code")
     raw_id_fields = ("plan",)
+    inlines = [PlanPriceChangeInline]
+    fieldsets = (
+        ("Plan", {"fields": ("plan", "version", "plan_sku", "tariff_code", "vat_basis")}),
+        _ApprovalAdmin.LIFECYCLE_FIELDSET,
+        _ApprovalAdmin.EVIDENCE_FIELDSET,
+        ("Allowances", {"fields": ("uk_data", "uk_minutes", "uk_texts", "fair_use", "speeds")}),
+        ("Out of allowance and rollover", {"fields": ("after_allowance", "extra_charges", "rollover_applies",
+                                                      "rollover")}),
+        ("Roaming", {"fields": ("roaming_zone", "roaming_allowance", "roaming_rates")}),
+        ("Charges and price changes", {"fields": ("one_off_charges", "price_changes_apply",
+                                                  "scheduled_price_changes")}),
+    )
 
-    def save_model(self, request, obj, form, change):
-        if obj.approved and not obj.approved_at:
-            obj.approved_at = timezone.now()
-        super().save_model(request, obj, form, change)
-
-    def has_delete_permission(self, request, obj=None):
-        return not (obj and obj.approved)
+    @admin.display(description="Problems")
+    def problem_count(self, obj):
+        return len(obj.approval_problems()) if obj.state == obj.State.DRAFT else "—"
 
 
 class SwitchContractDocumentInline(admin.TabularInline):
@@ -298,11 +440,25 @@ class SwitchContractDocumentInline(admin.TabularInline):
         return False
 
 
+class SwitchContractProvisionInline(admin.TabularInline):
+    """How and when the documents were provided (evidence, view-only)."""
+
+    model = SwitchContractProvision
+    extra = 0
+    can_delete = False
+    fields = ("created_at", "method", "document", "succeeded", "recipient_masked", "actor", "ip_address")
+    readonly_fields = fields
+    verbose_name = "provision event"
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 class SwitchContractConsentInline(admin.StackedInline):
     model = SwitchContractConsent
     extra = 0
     can_delete = False
-    fields = ("consented_at", "customer", "statement", "statement_version", "documents",
+    fields = ("consented_at", "customer", "statement", "statement_version", "documents", "provision",
               "immediate_service_requested", "ip_address", "user_agent", "order")
     readonly_fields = fields
 
@@ -319,7 +475,7 @@ class SwitchContractPackAdmin(admin.ModelAdmin):
     list_filter = ("email_status",)
     search_fields = ("reference", "switch_request__reference")
     readonly_fields = [f.name for f in SwitchContractPack._meta.fields]
-    inlines = [SwitchContractDocumentInline, SwitchContractConsentInline]
+    inlines = [SwitchContractDocumentInline, SwitchContractProvisionInline, SwitchContractConsentInline]
 
     @admin.display(boolean=True)
     def consented(self, obj):
