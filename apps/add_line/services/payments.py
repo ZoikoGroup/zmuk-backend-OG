@@ -15,6 +15,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from apps.coupons.models import Coupon, CouponUsage
+from apps.payment_methods import services as payment_methods
 from core.stripe_compat import to_plain
 
 from .. import signals
@@ -80,6 +81,8 @@ def handle_payment_succeeded(order: AddLineOrder, intent) -> AddLineOrder:
             order.save(update_fields=["fulfilment_status", "updated_at"])
 
     signals.send(signals.order_paid, sender=AddLineOrder, order=order)
+    # "Save this card" ticked at checkout; no-op otherwise, never raises.
+    payment_methods.save_from_payment_safely(intent)
     return _fulfil_after_payment(order)
 
 

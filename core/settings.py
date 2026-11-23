@@ -91,6 +91,8 @@ INSTALLED_APPS = [
     "apps.sims",
     "apps.add_line",
     "apps.roaming",
+    "apps.offers",
+    "apps.payment_methods",
 
     # Third-party apps
     "django_ckeditor_5",
@@ -363,6 +365,17 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 # Optional dedicated signing secret for /api/v1/checkout/webhook/. Stripe gives every
 # webhook endpoint its own secret; falls back to STRIPE_WEBHOOK_SECRET when unset.
 STRIPE_CHECKOUT_WEBHOOK_SECRET = os.getenv("STRIPE_CHECKOUT_WEBHOOK_SECRET")
+
+# Saved payment methods (/api/v1/payment-methods/). Off until the release gates
+# in the 23 Nov 2026 decision note are passed. While off, the endpoints answer 404
+# and checkout refuses paymentMethodId / saveCard.
+SAVED_PAYMENT_METHODS_ENABLED = os.getenv("SAVED_PAYMENT_METHODS_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+SAVED_PAYMENT_METHODS_MAX = 3
+# Social-login accounts have no password: removing a card / changing the default
+# needs a login within this many minutes instead.
+SAVED_PAYMENT_METHODS_REAUTH_MINUTES = int(os.getenv("SAVED_PAYMENT_METHODS_REAUTH_MINUTES", "15"))
+# Signing secret of the /api/v1/payment-methods/webhook/ endpoint (its own, like add-line's).
+STRIPE_PAYMENT_METHODS_WEBHOOK_SECRET = os.getenv("STRIPE_PAYMENT_METHODS_WEBHOOK_SECRET")
 
 
 

@@ -38,6 +38,14 @@ class CheckoutPayment(models.Model):
         related_name="checkout_payments",
     )
     stripe_payment_intent_id = models.CharField(max_length=255, blank=True, default="")
+    # Set when the customer paid with one of their saved cards (audit only).
+    saved_payment_method = models.ForeignKey(
+        "payment_methods.PaymentMethod",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
     email = models.EmailField(db_index=True, blank=True, default="")
     amount_pence = models.PositiveIntegerField()
     currency = models.CharField(max_length=8, default="gbp")
