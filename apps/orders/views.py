@@ -17,6 +17,8 @@ from .serializers import BqOrderSerializer
 from .models import BqOrder, CheckoutPayment
 from .pricing import CheckoutError, money, price_cart
 from apps.coupons.models import Coupon, CouponUsage
+from apps.payment_methods import services as payment_methods
+from apps.payment_methods.models import PaymentMethodSetup
 from collections import defaultdict
 
 import stripe
@@ -176,11 +178,18 @@ class CheckoutCreateIntentView(APIView):
     Stripe PaymentIntent. Only order_ref goes into Stripe metadata — the
     full payload lives in our DB, looked up by the webhook after payment.
 
-    Request body: { total, cart, couponCode?, billingAddress, shippingAddress }
+    Request body: { total, cart, couponCode?, billingAddress, shippingAddress,
+                    paymentMethodId?, saveCard?, saveCardConsentVersion? }
     (`subtotal` / `discountAmount` may still be sent but are ignored.)
     Send `Authorization: Token …` when logged in; it is required for public
-    sector / student plans and for coupons.
+    sector / student plans, for coupons and for saved cards.
     Response: { clientSecret, order_ref, totals }
+
+    Saved cards (apps/payment_methods, logged in only):
+      * paymentMethodId — pay with one of the customer's saved cards. The card
+        is set on the PaymentIntent here; the browser only confirms it
+        (stripe.confirmCardPayment(clientSecret)), so it can't swap cards.
+      * saveCard: true + saveCardConsentVersion — save the new card once paid.
 
     Prices, the coupon discount and the total are worked out on the server
     (apps/orders/pricing.py). `total` is what the customer saw: if it differs
@@ -227,6 +236,16 @@ class CheckoutCreateIntentView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        try:
+            card_plan = payment_methods.plan_checkout(
+                request.user,
+                payment_method_id=data.get("paymentMethodId"),
+                save_card=data.get("saveCard") is True,
+                consent_version=data.get("saveCardConsentVersion"),
+            )
+        except payment_methods.PaymentMethodError as exc:
+            return Response({"error": exc.message, "code": exc.code, "message": exc.message}, status=exc.status)
+
         billing = data.get("billingAddress") or {}
         email = (billing.get("email") or "").strip()
 
@@ -245,8 +264,8 @@ class CheckoutCreateIntentView(APIView):
                 else None
             ),
         }
-        payload.pop("couponCode", None)
-        payload.pop("coupon_code", None)
+        for key in ("couponCode", "coupon_code", "paymentMethodId", "saveCard", "saveCardConsentVersion"):
+            payload.pop(key, None)
 
         payment = CheckoutPayment.objects.create(
             email=email,
@@ -254,6 +273,7 @@ class CheckoutCreateIntentView(APIView):
             amount_pence=int(priced.total * 100),
             currency="gbp",
             payload=payload,
+            saved_payment_method=card_plan.payment_method if card_plan else None,
         )
 
         key = getattr(settings, "STRIPE_SECRET_KEY", "") or ""
@@ -265,14 +285,14 @@ class CheckoutCreateIntentView(APIView):
         stripe.api_key = key
 
         try:
-            intent = stripe.PaymentIntent.create(
-                amount=payment.amount_pence,
-                currency=payment.currency,
-                automatic_payment_methods={"enabled": True},
-                receipt_email=email or None,
-                metadata={"order_ref": payment.order_ref, "source": "zoiko_checkout"},
-                idempotency_key=f"checkout-intent-{payment.order_ref}",
-            )
+            intent = stripe.PaymentIntent.create(**payment_methods.apply_plan({
+                "amount": payment.amount_pence,
+                "currency": payment.currency,
+                "automatic_payment_methods": {"enabled": True},
+                "receipt_email": email or None,
+                "metadata": {"order_ref": payment.order_ref, "source": "zoiko_checkout"},
+                "idempotency_key": f"checkout-intent-{payment.order_ref}",
+            }, card_plan))
         except Exception as exc:
             payment.status = CheckoutPayment.STATUS_FAILED
             payment.save(update_fields=["status"])
@@ -281,6 +301,12 @@ class CheckoutCreateIntentView(APIView):
 
         payment.stripe_payment_intent_id = intent.id
         payment.save(update_fields=["stripe_payment_intent_id"])
+        payment_methods.record_checkout_save(
+            request.user, card_plan, intent.id,
+            source=PaymentMethodSetup.Source.CHECKOUT,
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+        )
 
         return Response({
             "clientSecret": intent.client_secret,
@@ -358,6 +384,9 @@ class ConfirmCheckoutView(APIView):
                 "message": f"Payment not completed (status: {intent.status}).",
             }, status=402)
 
+        # Only this order's own PaymentIntent may save a card ("save this card").
+        save_card_intent = pi_id == payment.stripe_payment_intent_id
+
         if payment.status != CheckoutPayment.STATUS_PAID:
             payment.status = CheckoutPayment.STATUS_PAID
             payment.stripe_payment_intent_id = pi_id
@@ -367,6 +396,9 @@ class ConfirmCheckoutView(APIView):
             _process_checkout_payment(payment)
         except Exception:
             logger.exception("Failed to process checkout order %s", order_ref)
+
+        if save_card_intent:
+            payment_methods.save_from_payment_safely(intent)
 
         return Response({
             "success": True,
@@ -483,6 +515,8 @@ def checkout_webhook(request):
                     _process_checkout_payment(payment)
                 except Exception:
                     logger.exception("Failed to process checkout order for %s — will need manual review", ref)
+            # "Save this card" ticked at checkout: no-op for any other payment.
+            payment_methods.save_from_payment_safely(intent)
 
     elif etype == "payment_intent.payment_failed":
         intent = event["data"]["object"]

@@ -19,6 +19,8 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from apps.payment_methods import services as payment_methods
+from apps.payment_methods.models import PaymentMethodSetup
 from apps.sims import reservations
 from core.stripe_compat import to_plain
 
@@ -87,16 +89,24 @@ def release(order: AddLineOrder, reason: str, actor=None):
 
 
 def start_checkout(user, *, quote_token, switch_choice, billing, delivery_address,
-                   contract, ip_address=None, user_agent=""):
+                   contract, ip_address=None, user_agent="",
+                   payment_method_id=None, save_card=False, save_card_consent_version=""):
     """Returns (order, client_secret). client_secret is None for a £0 order."""
     _check_customer(user)
     try:
         quote = redeem_token(user, quote_token)
     except QuoteError as exc:
         raise CheckoutError(exc.code, exc.message, 409 if exc.code == "QUOTE_CHANGED" else 400)
+    try:
+        card_plan = payment_methods.plan_checkout(
+            user, payment_method_id=payment_method_id, save_card=save_card,
+            consent_version=save_card_consent_version,
+        )
+    except payment_methods.PaymentMethodError as exc:
+        raise CheckoutError(exc.code, exc.message, exc.status)
     return _checkout(user, quote, switch_choice=switch_choice, billing=billing,
                      delivery_address=delivery_address, contract=contract,
-                     ip_address=ip_address, user_agent=user_agent)
+                     ip_address=ip_address, user_agent=user_agent, card_plan=card_plan)
 
 
 def checkout_quote(user, quote, *, switch_choice, billing, delivery_address, contract,
@@ -115,7 +125,7 @@ def checkout_quote(user, quote, *, switch_choice, billing, delivery_address, con
 
 
 def _checkout(user, quote, *, switch_choice, billing, delivery_address, contract,
-              ip_address=None, user_agent="", metadata=None):
+              ip_address=None, user_agent="", metadata=None, card_plan=None):
     _check_contract(contract)
     if quote.sim_type == SimType.PSIM and not delivery_address:
         raise CheckoutError("DELIVERY_ADDRESS_REQUIRED", "Enter a delivery address for your SIM.")
@@ -140,6 +150,7 @@ def _checkout(user, quote, *, switch_choice, billing, delivery_address, contract
         coupon=quote.coupon, total_gross=amount, vat_amount=quote.vat_included,
         billing={**billing, "email": billing.get("email") or user.email},
         delivery_address=delivery_address if quote.sim_type == SimType.PSIM else None,
+        saved_payment_method=card_plan.payment_method if card_plan and needs_payment else None,
     )
     audit.record("checkout_started", order=order, actor=user,
                  after=order.payment_status, amount=str(amount))
@@ -172,16 +183,16 @@ def _checkout(user, quote, *, switch_choice, billing, delivery_address, contract
         return order, None
 
     try:
-        intent = stripe.PaymentIntent.create(
-            amount=int(amount * 100),
-            currency="gbp",
-            automatic_payment_methods={"enabled": True},
-            receipt_email=order.billing.get("email") or None,
+        intent = stripe.PaymentIntent.create(**payment_methods.apply_plan({
+            "amount": int(amount * 100),
+            "currency": "gbp",
+            "automatic_payment_methods": {"enabled": True},
+            "receipt_email": order.billing.get("email") or None,
             # `source` and `add_line_order` are what the webhook matches on;
             # extra keys (e.g. switch_request) are for support only.
-            metadata={**(metadata or {}), "add_line_order": order.order_reference, "source": STRIPE_SOURCE},
-            idempotency_key=f"add-line-intent-{order.order_reference}",
-        )
+            "metadata": {**(metadata or {}), "add_line_order": order.order_reference, "source": STRIPE_SOURCE},
+            "idempotency_key": f"add-line-intent-{order.order_reference}",
+        }, card_plan))
     except Exception:
         logger.exception("Add-line PaymentIntent creation failed for %s", order.order_reference)
         release(order, "payment_init_failed", actor=user)
@@ -189,6 +200,10 @@ def _checkout(user, quote, *, switch_choice, billing, delivery_address, contract
 
     order.stripe_payment_intent_id = intent.id
     order.save(update_fields=["stripe_payment_intent_id", "updated_at"])
+    payment_methods.record_checkout_save(
+        user, card_plan, intent.id, source=PaymentMethodSetup.Source.ADD_LINE,
+        ip_address=ip_address, user_agent=user_agent,
+    )
     return order, intent.client_secret
 
 

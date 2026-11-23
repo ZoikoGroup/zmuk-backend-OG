@@ -224,6 +224,10 @@ class AddLineOrder(models.Model):
         max_length=12, choices=PaymentStatus.choices, default=PaymentStatus.PENDING, db_index=True
     )
     stripe_payment_intent_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    # Set when the customer paid with one of their saved cards (audit only).
+    saved_payment_method = models.ForeignKey(
+        "payment_methods.PaymentMethod", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
     paid_at = models.DateTimeField(null=True, blank=True)
     # Latest declined attempt (Stripe code + customer-safe message, no card data).
     # The order stays open so the customer can retry.

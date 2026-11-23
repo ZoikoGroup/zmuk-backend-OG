@@ -65,6 +65,10 @@ class CheckoutRequestSerializer(serializers.Serializer):
     billing = BillingSerializer()
     delivery_address = DeliveryAddressSerializer(required=False, allow_null=True, default=None)
     contract = ContractSerializer()
+    # Saved cards (apps/payment_methods): pay with one, or save the new card once paid.
+    payment_method_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    save_card = serializers.BooleanField(required=False, default=False)
+    save_card_consent_version = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 def _order_message(order: AddLineOrder) -> str:

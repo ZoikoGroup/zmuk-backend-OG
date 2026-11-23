@@ -147,8 +147,12 @@ class QuoteView(APIView):
 class CheckoutView(APIView):
     """POST /api/v1/lines/checkout/
 
-    { quote_token, switch_choice, billing, delivery_address?, contract }
+    { quote_token, switch_choice, billing, delivery_address?, contract,
+      payment_method_id?, save_card?, save_card_consent_version? }
       → { order_reference, client_secret, payment_required }
+
+    With payment_method_id the saved card is already set on the PaymentIntent:
+    the browser calls stripe.confirmCardPayment(client_secret) with no card form.
 
     Holds a line slot and a SIM, records the contract acceptance and creates
     the Stripe PaymentIntent. The browser confirms the payment with
@@ -172,6 +176,9 @@ class CheckoutView(APIView):
                 contract=data["contract"],
                 ip_address=request.META.get("REMOTE_ADDR"),
                 user_agent=request.META.get("HTTP_USER_AGENT", ""),
+                payment_method_id=data["payment_method_id"],
+                save_card=data["save_card"],
+                save_card_consent_version=data["save_card_consent_version"],
             )
         except checkout.CheckoutError as exc:
             return _error(exc.code, exc.message, exc.status)
