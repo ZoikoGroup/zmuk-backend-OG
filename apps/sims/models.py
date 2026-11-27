@@ -63,11 +63,29 @@ class Sim(models.Model):
         PENDING = "PENDING", "Pending (reserved in a cart)"
         RESERVED = "RESERVED", "Reserved (assigned to an order)"
         ACTIVATED = "ACTIVATED", "Activated"
+        # Replaced by a SIM type change (CT-005): the subscriber and number now
+        # live on another SIM. Never sold or reactivated.
+        RETIRED = "RETIRED", "Retired (replaced)"
 
     inventory = models.CharField(
         max_length=16,
         choices=Inventory.choices,
         default=Inventory.IN_STOCK,
+        db_index=True,
+    )
+
+    # What the SIM may be used for. Sales SIMs come pre-loaded with a number
+    # and are sold in the shop. Swap SIMs have no number and only replace the
+    # SIM of an existing subscriber (Change SIM type, CT-005 Addendum v2.1 B4).
+    # The shop never sells a Swap SIM, and a Sales SIM is never used for a swap.
+    class Purpose(models.TextChoices):
+        SALES = "sales", "Sales SIM"
+        SWAP = "swap", "Swap SIM"
+
+    inventory_purpose = models.CharField(
+        max_length=8,
+        choices=Purpose.choices,
+        default=Purpose.SALES,
         db_index=True,
     )
     # Order this SIM was assigned to (free-form reference, e.g. "WC-1042").

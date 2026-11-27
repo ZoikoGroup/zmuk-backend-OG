@@ -43,6 +43,7 @@ path("api/", include("apps.contact.urls")),
     path("api/v1/lines/", include("apps.add_line.urls")),  # Add a New Number: lines, eligibility, checkout, porting
     path("api/v1/", include("apps.roaming.urls")),  # Roaming & Travel: destinations, lines/<id>/roaming-quote/
     path("api/v1/", include("apps.offers.urls")),  # Latest offers: limited-time offer cards (offers/)
+    path("api/v1/", include("apps.sim_change.urls")),  # Change SIM type (CT-005): lines/<id>/sim-type-options|changes, sim-type-changes/<id>/
     path("api/v1/payment-methods/", include("apps.payment_methods.urls")),  # Saved cards: list, add (SetupIntent), default, remove, webhook
     path("api/", include("apps.enterprise.urls")),
     path("api/", include("apps.public_sector.urls")),

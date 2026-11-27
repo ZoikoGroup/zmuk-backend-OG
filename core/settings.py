@@ -93,6 +93,7 @@ INSTALLED_APPS = [
     "apps.roaming",
     "apps.offers",
     "apps.payment_methods",
+    "apps.sim_change",
 
     # Third-party apps
     "django_ckeditor_5",
@@ -279,6 +280,11 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "100/hour",
         "user": "1000/hour",
+        # Change SIM type (apps.sim_change): case creation, receipt (ICCID)
+        # checks and fraud reports are rate-limited (CTO v2.0 §8.1).
+        "sim_change_create": "10/hour",
+        "sim_change_receipt": "10/hour",
+        "sim_change_report": "10/hour",
     },
 }
 
@@ -524,6 +530,74 @@ SWITCH_DOCUMENTS_VALID_MINUTES = int(os.getenv("SWITCH_DOCUMENTS_VALID_MINUTES",
 # A register row last validated longer ago than this gives STALE instead of a
 # personalised quote (ROAM-005 §04, CT-001 §09-5).
 ROAMING_REGISTER_STALE_DAYS = int(os.getenv("ROAMING_REGISTER_STALE_DAYS", "90"))
+
+# =============================================================================
+# CHANGE SIM TYPE (apps.sim_change) — CT-005, CTO Engineering Response v2.0
+# =============================================================================
+
+# Release flags (§4.2). Each is independent and OFF / safe by default.
+# "assisted": requests are support-managed; "self_service" only after the four
+# sign-offs; "off": the journey isn't offered at all. This changes what the
+# customer is offered, not supplier access.
+SIM_TYPE_CHANGE_MODE = os.getenv("SIM_TYPE_CHANGE_MODE", "assisted")
+# How long a quote stays valid, and the version of the request wording the
+# customer agrees to (Product owns the text; bump when it changes).
+SIM_CHANGE_QUOTE_MINUTES = int(os.getenv("SIM_CHANGE_QUOTE_MINUTES", "30"))
+SIM_CHANGE_CONSENT_VERSION = os.getenv("SIM_CHANGE_CONSENT_VERSION", "2026-11-27")
+# Recent password / email / phone / address changes within this many days mark
+# a request high-risk (second approver needed). PROPOSED; Security to confirm.
+SIM_CHANGE_RISK_REVIEW_DAYS = int(os.getenv("SIM_CHANGE_RISK_REVIEW_DAYS", "14"))
+# Anything that changes things on Transatel for a SIM change. Deliberately NOT
+# tied to ADD_LINE_SUPPLIER_WRITES_ENABLED (§1).
+SIM_CHANGE_SUPPLIER_WRITES_ENABLED = os.getenv("SIM_CHANGE_SUPPLIER_WRITES_ENABLED", "False") == "True"
+# Secure eSIM install access for customers.
+SIM_CHANGE_ESIM_ACCESS_ENABLED = os.getenv("SIM_CHANGE_ESIM_ACCESS_ENABLED", "False") == "True"
+# Charging a fee (needs Commercial sign-off and Stripe test evidence).
+SIM_CHANGE_FEES_ENABLED = os.getenv("SIM_CHANGE_FEES_ENABLED", "False") == "True"
+# Lines claimed from legacy accounts (source=legacy_claim) may request a change.
+SIM_CHANGE_LEGACY_CLAIMS_ENABLED = os.getenv("SIM_CHANGE_LEGACY_CLAIMS_ENABLED", "False") == "True"
+
+# Fixed tenant for this UK deployment (Addendum v2.1 B2). Server-controlled,
+# never taken from a request.
+SIM_CHANGE_TENANT = os.getenv("SIM_CHANGE_TENANT", "ZMUK")
+
+# How long a recorded identity verification can be used (incl. waiting for a
+# Security / Fraud approver on a high-risk request).
+SIM_CHANGE_STEP_UP_MINUTES = int(os.getenv("SIM_CHANGE_STEP_UP_MINUTES", "60"))
+
+# Maker-checker (Addendum v2.1 A3): the verifier can never authorise or
+# execute a swap. True also stops the authoriser executing it themselves.
+SIM_CHANGE_EXECUTOR_MUST_DIFFER_FROM_AUTHORISER = (
+    os.getenv("SIM_CHANGE_EXECUTOR_MUST_DIFFER_FROM_AUTHORISER", "False") == "True"
+)
+
+# How long a reserved Swap SIM waits for dispatch / swap before the case is
+# flagged to support (flag_expired_swap_reservations). The SIM stays reserved.
+SIM_CHANGE_STOCK_RESERVATION_HOURS = int(os.getenv("SIM_CHANGE_STOCK_RESERVATION_HOURS", "48"))
+
+# A new delivery address, or an account address changed within this many days,
+# gets enhanced review before dispatch. PROPOSED control (Addendum v2.1 Q5):
+# Security to confirm the number.
+SIM_CHANGE_ADDRESS_REVIEW_DAYS = int(os.getenv("SIM_CHANGE_ADDRESS_REVIEW_DAYS", "14"))
+
+# After an executed swap, how long the supplier may take to show it before the
+# case goes to reconciliation. PLACEHOLDER: set from supplier UAT timings.
+SIM_CHANGE_RECONCILE_AFTER_MINUTES = int(os.getenv("SIM_CHANGE_RECONCILE_AFTER_MINUTES", "30"))
+
+# A supplier read older than this can't confirm (or rule out) a swap.
+SIM_CHANGE_EVIDENCE_MAX_AGE_MINUTES = int(os.getenv("SIM_CHANGE_EVIDENCE_MAX_AGE_MINUTES", "15"))
+
+# Keyed HMAC for ICCID / MSISDN fingerprints (32+ random characters), and a
+# Fernet key for the few encrypted values (delivery snapshot). Separate from
+# PAC_ENCRYPTION_KEY. Generate the Fernet key with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+SIM_CHANGE_FINGERPRINT_KEY = os.getenv("SIM_CHANGE_FINGERPRINT_KEY", "")
+SIM_CHANGE_ENCRYPTION_KEY = os.getenv("SIM_CHANGE_ENCRYPTION_KEY", "")
+
+# Account security events (apps.security): changes before this date weren't
+# recorded, so a risk check covering earlier dates reports "history
+# unavailable" instead of treating the account as clean (clarification B3).
+ACCOUNT_SECURITY_EVENTS_SINCE = os.getenv("ACCOUNT_SECURITY_EVENTS_SINCE", "2026-11-26")
 
 # =============================================================================
 # EMAIL / SMTP

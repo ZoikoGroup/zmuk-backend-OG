@@ -1,0 +1,17 @@
+{% extends "admin/change_form.html" %}
+{% block object-tools-items %}
+  {% for a in sim_change_actions %}
+    <li><a href="{{ a.url }}">{{ a.label }}</a></li>
+  {% endfor %}
+  {{ block.super }}
+{% endblock %}
+{% block field_sets %}
+  {% if sim_change_risk %}
+    <div class="module" style="padding:8px 12px;margin-bottom:12px;">
+      <strong>Risk:</strong> {{ sim_change_risk.tier }}
+      {% if sim_change_risk.flags %} &middot; {{ sim_change_risk.flags|join:", " }}{% endif %}
+      {% if not sim_change_actions %}<br><em>No step is waiting for your role on this request.</em>{% endif %}
+    </div>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}

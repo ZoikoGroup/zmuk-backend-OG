@@ -43,6 +43,9 @@ _PORT_DATE_KEYS = ("portabilityDate", "portingDate", "portDate")
 MAX_BODY_BYTES = 64 * 1024
 
 SUBSCRIBER_ACTIVATED = "CONNECTIVITY-MANAGEMENT/SUBSCRIBER/ACTIVATED"
+# SIM type change (CT-005): the SIM card swap event. Only a prompt to re-read
+# the supplier; MSISDN/SWAPPED is a different operation and is ignored.
+SIMCARD_SWAPPED = "CONNECTIVITY-MANAGEMENT/SUBSCRIBER/SIMCARD/SWAPPED"
 _PORTABILITY_PREFIX = "CONNECTIVITY-MANAGEMENT/PORTABILITY/UK/"
 # PORT_IN carries PAC requests, SWITCH_IN carries STAC requests.
 _FLOW_CODE_TYPE = {"PORT_IN": PortRequest.CodeType.PAC, "SWITCH_IN": PortRequest.CodeType.STAC}
@@ -189,5 +192,14 @@ def process(event: SupplierEvent):
         ):
             fulfilment.fulfil(order)  # re-checks Transatel before marking live
             return _finish(event, SupplierEvent.Status.PROCESSED)
+
+    if event_type == SIMCARD_SWAPPED:
+        from apps.sim_change.services import reconcile
+
+        case = reconcile.case_for_serial(serial) if serial else None
+        if case is None:
+            return _finish(event, SupplierEvent.Status.IGNORED, error="no SIM type change in progress for this SIM")
+        outcome = reconcile.check_case(case, reason="simcard_swapped_event")  # re-reads; never trusts the event
+        return _finish(event, SupplierEvent.Status.PROCESSED, error=f"sim type change {case.uuid}: {outcome}")
 
     return _finish(event, SupplierEvent.Status.IGNORED, error="no action for this event")

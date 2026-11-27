@@ -63,13 +63,20 @@ def _store_qr(sim, qr: dict) -> None:
 def deliver_qr(service, sim) -> str:
     """Fetch → store → email the eSIM QR for one SIM.
 
-    Returns one of: "sent", "already", "not_esim", "not_ready", "no_email",
-    "error:<msg>". Safe to call repeatedly; only sends once.
+    Returns one of: "sent", "already", "not_esim", "suppressed", "not_ready",
+    "no_email", "error:<msg>". Safe to call repeatedly; only sends once.
+
+    "suppressed": the SIM belongs to a SIM type change case (CT-005). Its
+    credentials are never fetched, stored on the Sim row or emailed here; the
+    customer gets them through the secure setup page instead (Addendum v2.1 A1).
     """
     if sim.esim_qr_emailed:
         return "already"
     if not sim.is_esim:
         return "not_esim"
+    from apps.sim_change.services.suppression import is_change_case_sim
+    if is_change_case_sim(sim):
+        return "suppressed"
 
     serial = sim.serial_number or sim.iccid
     try:

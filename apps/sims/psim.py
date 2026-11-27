@@ -20,13 +20,19 @@ logger = logging.getLogger("apps.sims")
 def deliver_details(sim) -> str:
     """Email the pSIM's ICCID / IMSI / MSISDN for one SIM.
 
-    Returns one of: "sent", "already", "not_psim", "no_email",
+    Returns one of: "sent", "already", "not_psim", "suppressed", "no_email",
     "error:<msg>". Safe to call repeatedly; only sends once.
+
+    "suppressed": the SIM belongs to a SIM type change case (CT-005), whose
+    ICCID / IMSI must never be emailed (Addendum v2.1 A1).
     """
     if sim.psim_details_emailed:
         return "already"
     if sim.is_esim:
         return "not_psim"
+    from apps.sim_change.services.suppression import is_change_case_sim
+    if is_change_case_sim(sim):
+        return "suppressed"
 
     email, name = customer_for(sim)
     if not email:

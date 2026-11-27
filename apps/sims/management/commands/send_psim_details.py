@@ -19,6 +19,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 
+from apps.sim_change.services.suppression import change_case_sims_q
 from apps.sims.models import Sim
 from apps.sims.psim import deliver_details
 
@@ -37,6 +38,9 @@ class Command(BaseCommand):
             psim_details_emailed=False,
         ).exclude(
             Q(type_of_sim__icontains="euicc") | Q(type_of_sim__icontains="esim")
+        ).exclude(
+            # SIM type change (CT-005) SIMs never go through this email (Addendum v2.1 A1).
+            change_case_sims_q()
         )
         if opts["iccid"]:
             qs = qs.filter(iccid=opts["iccid"])

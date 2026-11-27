@@ -4,6 +4,7 @@ Port of the plugin's reservation logic (`reserve_sims_for_cart`,
 `release_*`, `assign_sims_to_order`). Selection rules, matching the plugin:
 
 * inventory must be IN_STOCK
+* inventory_purpose must be "sales" (Swap SIMs are never sold)
 * provisioning_status must be "available" (case/space-insensitive)
 * the SIM must have an MSISDN (empty-MSISDN SIMs are never sold)
 * type_of_sim must match the requested delivery type (esim / psim)
@@ -46,6 +47,8 @@ def _available_queryset(sim_type_key: str):
     has_msisdn = ~Q(msisdn="") & Q(msisdn__isnull=False)
     qs = (
         Sim.objects.filter(inventory=Sim.Inventory.IN_STOCK)
+        # Swap SIMs (Change SIM type stock) are never sold.
+        .filter(inventory_purpose=Sim.Purpose.SALES)
         .filter(has_msisdn)
         .annotate()  # placeholder to keep chaining readable
     )
@@ -77,6 +80,7 @@ def latest_available_sim() -> Sim | None:
     """
     qs = (
         Sim.objects.filter(inventory=Sim.Inventory.IN_STOCK)
+        .filter(inventory_purpose=Sim.Purpose.SALES)
         .filter(~Q(msisdn="") & Q(msisdn__isnull=False))
         .filter(provisioning_status__iexact="available")
     )
