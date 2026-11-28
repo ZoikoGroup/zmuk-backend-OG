@@ -10,7 +10,6 @@ last four digits, the delivery address not returned at all.
 
 from datetime import timedelta
 
-from django.conf import settings
 from django.utils import timezone
 
 from .. import states
@@ -89,9 +88,14 @@ def allowed_actions(case: SimTypeChangeCase) -> list:
         actions.append("confirm")
     if case.to_type == "psim" and case.physical_fulfilment in (PhysicalFulfilment.SHIPPED, PhysicalFulfilment.DELIVERED):
         actions.append("confirm_receipt")
-    if (case.to_type == "esim" and case.esim_fulfilment in (EsimFulfilment.ACCESS_READY,)
-            and getattr(settings, "SIM_CHANGE_ESIM_ACCESS_ENABLED", False)):
-        actions.append("esim_setup")
+    if case.to_type == "esim":
+        from . import esim_access  # local import: esim_access builds on the staff services
+
+        if (case.esim_fulfilment == EsimFulfilment.ACCESS_READY and esim_access.feature_open_for(case.owner)
+                and esim_access.valid_access_grant(case) is not None):
+            actions.append("esim_setup")
+        if case.esim_fulfilment == EsimFulfilment.ACCESS_ISSUED:
+            actions.append("report_installed")
     ended_recently = case.closed_at is None or timezone.now() - case.closed_at <= REPORT_WINDOW
     if case.status != S.HOLD_FRAUD and ended_recently:
         actions.append("report_unauthorised")
@@ -123,6 +127,12 @@ def case_view(case: SimTypeChangeCase) -> dict:
         } if shipped else None,
         "new_sim_last4": case.new_sim.iccid[-4:] if case.new_sim_id and case.to_type == "psim" and shipped else None,
         "charge": (case.quote or {}).get("charge"),
+        # The re-issued quote the customer confirms (only while it's waiting for them).
+        "quote": {
+            "quote_hash": case.quote_hash,
+            "expires_at": (case.quote or {}).get("expires_at"),
+            "requirements": (case.quote or {}).get("requirements", []),
+        } if case.status == S.AWAITING_CONFIRMATION else None,
         "supplier_confirmed_at": case.binding_confirmed_at,
         "service_ready_at": case.service_ready_at,
         "created_at": case.created_at,

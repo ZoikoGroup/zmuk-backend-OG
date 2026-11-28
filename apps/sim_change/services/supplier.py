@@ -119,6 +119,31 @@ def read_binding(case):
     )
 
 
+class ProfileUnavailable(Exception):
+    """The eSIM profile couldn't be read from the supplier."""
+
+
+def esim_profile(case) -> dict:
+    """Live eSIM installation details for the case's replacement SIM.
+
+    Fetched from Transatel at the moment of use and handed straight back:
+    callers must never store, log or email the result (Addendum v2.1 A2).
+    Raises ProfileUnavailable if the supplier can't be read or the profile
+    isn't ready.
+    """
+    sim = case.new_sim
+    if sim is None:
+        raise ProfileUnavailable("no replacement SIM")
+    try:
+        profile = get_service().get_esim_qr(sim.serial_number or sim.iccid) or {}
+    except TransatelError as exc:
+        logger.warning("eSIM profile read failed for case %s: %s", case.uuid, type(exc).__name__)
+        raise ProfileUnavailable("supplier unavailable") from exc
+    if not profile.get("qr_code_value"):
+        raise ProfileUnavailable("profile not ready")
+    return profile
+
+
 def read_line(line) -> LineRead:
     """Current supplier view of the line's SIM: status and whether the number agrees."""
     correlation_id = uuid.uuid4().hex[:16]

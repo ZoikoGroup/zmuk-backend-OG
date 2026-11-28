@@ -11,12 +11,13 @@ from typing import Callable
 
 from django import forms
 
-from .models import PhysicalFulfilment, ProviderCommand, SimTypeChangeCase, StepUpGrant, SwapSimStock
+from .models import EsimFulfilment, PhysicalFulfilment, ProviderCommand, SimTypeChangeCase, StepUpGrant, SwapSimStock
 from . import states
-from .services import address, operations
+from .services import address, esim_access, operations
 
 S = SimTypeChangeCase.Status
 P = PhysicalFulfilment
+E = EsimFulfilment
 
 
 class VerificationForm(forms.Form):
@@ -54,6 +55,16 @@ class ReserveStockForm(forms.Form):
 class DispatchForm(forms.Form):
     carrier = forms.CharField(max_length=64)
     tracking_reference = forms.CharField(max_length=64)
+
+
+class EsimAccessForm(forms.Form):
+    policy_version = forms.CharField(max_length=32, help_text="Version of the Security-approved procedure you followed.")
+    external_reference = forms.CharField(max_length=128, required=False, label="Call / ticket reference")
+    supplier_operation_reference = forms.CharField(
+        max_length=128, required=False,
+        help_text="Only when re-issuing after a problem: reference of the controlled supplier operation "
+                  "(e.g. new Swap eSIM).",
+    )
 
 
 class ExecuteForm(forms.Form):
@@ -201,6 +212,33 @@ def _close(case, user, d):
     return "Request closed."
 
 
+def _can_issue_esim(c):
+    if c.to_type != "esim" or c.status not in (S.SUPPLIER_BINDING_CONFIRMED, S.SERVICE_READY):
+        return False
+    if c.esim_fulfilment == E.ACCESS_READY:
+        return esim_access.valid_access_grant(c) is None  # expired unused access can be re-issued
+    return c.esim_fulfilment in (E.NOT_STARTED, E.EXCEPTION)
+
+
+def _issue_esim(case, user, d):
+    grant = esim_access.issue_access(
+        case, agent=user, policy_version=d["policy_version"], external_reference=d["external_reference"],
+        supplier_operation_reference=d["supplier_operation_reference"],
+    )
+    return f"eSIM setup access issued; the customer must open it within {esim_access.access_minutes()} minutes " \
+           f"(expires {grant.expires_at:%H:%M})."
+
+
+def _esim_exception(case, user, d):
+    esim_access.record_exception(case, actor=user, reason=d["note"])
+    return "eSIM setup problem recorded; any unused access was withdrawn."
+
+
+def _verify_install(case, user, d):
+    esim_access.verify_installation(case, actor=user, note=d["note"])
+    return "Installation verified."
+
+
 ACTIONS = [
     Action("verify", "Record identity verification", "verify", _can_verify, VerificationForm, _verify),
     Action("approve", "Approve high-risk verification", "approve", _can_approve, ConfirmForm, _approve),
@@ -220,6 +258,13 @@ ACTIONS = [
            lambda c: c.status in (S.SWAP_IN_PROGRESS, S.RECONCILIATION_REQUIRED), ConfirmForm, _recheck),
     Action("close_not_swapped", "Close: supplier shows no swap", "authorise",
            lambda c: c.status == S.RECONCILIATION_REQUIRED, NoteForm, _close_not_swapped),
+    Action("issue_esim_access", "Issue eSIM setup access", "verify", _can_issue_esim, EsimAccessForm, _issue_esim),
+    Action("esim_exception", "eSIM setup problem", "fulfil",
+           lambda c: c.is_open and c.esim_fulfilment in (E.ACCESS_READY, E.ACCESS_ISSUED, E.INSTALLATION_REPORTED),
+           NoteForm, _esim_exception),
+    Action("verify_install", "Installation verified (e.g. test call)", "fulfil",
+           lambda c: c.is_open and c.esim_fulfilment in (E.ACCESS_ISSUED, E.INSTALLATION_REPORTED),
+           NoteForm, _verify_install),
     Action("close", "Close request (service confirmed)", "cases",
            lambda c: c.status == S.SERVICE_READY, NoteForm, _close),
     Action("release_hold", "Release hold", "cases", _can_release, NoteForm, _release),

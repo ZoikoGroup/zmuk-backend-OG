@@ -9,6 +9,8 @@
     POST /api/v1/sim-type-changes/<case_id>/cancel/           {expected_version?}
     POST /api/v1/sim-type-changes/<case_id>/confirm-receipt/  {iccid}
     POST /api/v1/sim-type-changes/<case_id>/report-unauthorised/ {note?}
+    POST /api/v1/sim-type-changes/<case_id>/activation-access/  → eSIM details once (flag-gated)
+    POST /api/v1/sim-type-changes/<case_id>/installed/          customer says the eSIM is installed
 
 Every route needs a logged-in customer and only sees their own lines and
 cases (404 otherwise, never revealing that another customer's exists).
@@ -20,15 +22,15 @@ from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from apps.add_line.models import Line
 
 from .models import SimTypeChangeCase
-from .services import eligibility, idempotency, presenter, quote, requests
+from .services import eligibility, esim_access, idempotency, notifications, presenter, quote, requests
 from .services.address import AddressError
 from .services.transitions import TransitionError
 
@@ -170,6 +172,56 @@ class SimTypeChangeReportView(_CaseActionView):
 
     def act(self, request, case):
         return requests.report_unauthorised(request.user, case, str(request.data.get("note") or ""))
+
+
+class SimTypeChangeEsimAccessView(_CustomerView):
+    """POST /api/v1/sim-type-changes/<case_id>/activation-access/  → eSIM details, once.
+
+    Fetched live from Transatel and never stored. The response must only be
+    rendered inside the logged-in page; it is never cached or referred on.
+    """
+
+    throttle_classes = [UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "sim_change_esim_access"
+
+    def post(self, request, case_id):
+        case = self.own_case(request, case_id)
+        try:
+            details = esim_access.open_access(request.user, case)
+        except TransitionError as exc:
+            return _error(exc)
+        response = _no_store(Response(details))
+        response["Pragma"] = "no-cache"
+        response["Referrer-Policy"] = "no-referrer"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
+
+
+class SimTypeChangeInstalledView(_CaseActionView):
+    def act(self, request, case):
+        return esim_access.report_installed(request.user, case)
+
+
+class ReportFromLinkView(APIView):
+    """POST /api/v1/sim-type-changes/report-unauthorised-link/  {token, note?}
+
+    The "This wasn't me" link in customer alerts. Works without logging in
+    (the customer's session may be the compromised one); the signed,
+    time-limited token identifies the case. Returns nothing about the case.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "sim_change_report_link"
+
+    def post(self, request):
+        try:
+            notifications.report_from_link(str(request.data.get("token") or ""), str(request.data.get("note") or ""))
+        except TransitionError as exc:
+            return _error(exc)
+        return _no_store(Response({"status": "received", "message": presenter.COPY["fraud"]},
+                                  status=status.HTTP_202_ACCEPTED))
 
 
 def _jsonable(value):

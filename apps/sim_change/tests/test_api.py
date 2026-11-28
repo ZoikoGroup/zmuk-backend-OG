@@ -288,9 +288,11 @@ class CaseActionTests(ApiTestBase):
         self.assertEqual(case.status, S.AWAITING_CONFIRMATION)
         detail = self.client.get(self.url(f"sim-type-changes/{case.uuid}/")).data
         self.assertIn("confirm", detail["allowed_actions"])
+        # The frontend confirms with the quote it was shown in the request object.
         response = self.client.post(self.url(f"sim-type-changes/{case.uuid}/confirm/"),
-                                    {"quote": {"quote_hash": case.quote_hash}}, format="json")
+                                    {"quote": {"quote_hash": detail["quote"]["quote_hash"]}}, format="json")
         self.assertEqual((response.status_code, response.data["status"]), (202, S.CASE_ACCEPTED))
+        self.assertIsNone(response.data["quote"])  # only shown while waiting for the customer
 
     def test_confirm_with_wrong_quote(self):
         case = self._to_awaiting_confirmation()

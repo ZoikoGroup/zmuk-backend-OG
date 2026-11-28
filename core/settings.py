@@ -285,6 +285,8 @@ REST_FRAMEWORK = {
         "sim_change_create": "10/hour",
         "sim_change_receipt": "10/hour",
         "sim_change_report": "10/hour",
+        "sim_change_esim_access": "5/hour",
+        "sim_change_report_link": "20/hour",
     },
 }
 
@@ -552,6 +554,15 @@ SIM_CHANGE_RISK_REVIEW_DAYS = int(os.getenv("SIM_CHANGE_RISK_REVIEW_DAYS", "14")
 SIM_CHANGE_SUPPLIER_WRITES_ENABLED = os.getenv("SIM_CHANGE_SUPPLIER_WRITES_ENABLED", "False") == "True"
 # Secure eSIM install access for customers.
 SIM_CHANGE_ESIM_ACCESS_ENABLED = os.getenv("SIM_CHANGE_ESIM_ACCESS_ENABLED", "False") == "True"
+# Pilot allowlist (comma-separated user IDs). Empty = everyone once enabled.
+# Never bypasses the other checks (Addendum v2.1 A2).
+SIM_CHANGE_ESIM_PILOT_USER_IDS = os.getenv("SIM_CHANGE_ESIM_PILOT_USER_IDS", "")
+# "This wasn't me" link in customer alerts: FRONTEND_URL + path + "?token=…";
+# the frontend page posts the token to /api/v1/sim-type-changes/report-unauthorised-link/.
+SIM_CHANGE_REPORT_PATH = os.getenv("SIM_CHANGE_REPORT_PATH", "/sim-change/report")
+SIM_CHANGE_REPORT_LINK_DAYS = int(os.getenv("SIM_CHANGE_REPORT_LINK_DAYS", "14"))
+# How long issued eSIM setup access stays usable (single use).
+SIM_CHANGE_ESIM_ACCESS_MINUTES = int(os.getenv("SIM_CHANGE_ESIM_ACCESS_MINUTES", "15"))
 # Charging a fee (needs Commercial sign-off and Stripe test evidence).
 SIM_CHANGE_FEES_ENABLED = os.getenv("SIM_CHANGE_FEES_ENABLED", "False") == "True"
 # Lines claimed from legacy accounts (source=legacy_claim) may request a change.

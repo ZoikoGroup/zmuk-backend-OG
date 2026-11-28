@@ -27,6 +27,7 @@ On a terminal status, unexecuted commands are cancelled and the line lock is
 released.
 """
 
+import logging
 from datetime import timedelta
 
 from django.conf import settings
@@ -69,6 +70,18 @@ _STAMPS = {
 }
 
 HIGH_RISK_TIERS = {"high", "elevated"}
+
+# Statuses that trigger a customer alert (services.notifications).
+NOTIFY_ON = {S.VERIFY_REQUIRED, S.PROVIDER_PENDING, S.SUPPLIER_BINDING_CONFIRMED, S.HOLD_FRAUD}
+
+
+def _notify(case_pk, status):
+    from . import notifications  # local import: notifications builds on this module
+
+    try:
+        notifications.send(case_pk, status)
+    except Exception:  # an alert must never undo or fail the committed change
+        logging.getLogger("apps.sim_change").exception("SIM change alert for case %s failed", case_pk)
 
 
 class TransitionError(Exception):
@@ -223,6 +236,11 @@ def transition(case: SimTypeChangeCase, to_status: str, *, source: str, actor=No
             status_before=before, status_after=to_status, status_source=source, version=case.version,
             reason=reason[:255], evidence=evidence, detail=detail or {}, trace_id=trace_id,
         )
+
+        if to_status in NOTIFY_ON:
+            # Customer alert, sent only once this change is committed.
+            case_pk = case.pk
+            transaction.on_commit(lambda: _notify(case_pk, to_status))
 
         if to_status in SimTypeChangeCase.TERMINAL_STATUSES:
             from . import stock  # local import: stock builds on this module
